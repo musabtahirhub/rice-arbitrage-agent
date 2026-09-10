@@ -1,0 +1,829 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Rice Arbitrage | Autonomous Counterparty Discovery & Trading Desk</title>
+  <meta name="description" content="Autonomous commodity arbitrage agent with dynamic market grounding, counterparty discovery, and automated outreach." />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet" />
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          fontFamily: { sans: ['Inter', 'system-ui', 'sans-serif'] },
+          colors: {
+            brand: {
+              50: '#f0fdf4', 100: '#dcfce7', 200: '#bbf7d0',
+              400: '#4ade80', 500: '#22c55e', 600: '#16a34a',
+              700: '#15803d', 800: '#166534', 900: '#14532d',
+            },
+            surface: {
+              800: '#1e1e2e', 850: '#181825', 900: '#11111b',
+              700: '#313244', 600: '#45475a',
+            }
+          },
+          animation: {
+            'fade-in': 'fadeIn 0.3s ease-out',
+            'slide-up': 'slideUp 0.3s ease-out',
+            'pulse-slow': 'pulse 3s ease-in-out infinite',
+          },
+          keyframes: {
+            fadeIn: { '0%': { opacity: '0' }, '100%': { opacity: '1' } },
+            slideUp: { '0%': { opacity: '0', transform: 'translateY(10px)' }, '100%': { opacity: '1', transform: 'translateY(0)' } },
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    body { background: #11111b; }
+    .glass {
+      background: rgba(30, 30, 46, 0.75);
+      backdrop-filter: blur(16px);
+      border: 1px solid rgba(69, 71, 90, 0.4);
+    }
+    .glass-light {
+      background: rgba(49, 50, 68, 0.45);
+      backdrop-filter: blur(8px);
+      border: 1px solid rgba(69, 71, 90, 0.3);
+    }
+    .glow-green { box-shadow: 0 0 20px rgba(34, 197, 94, 0.18); }
+    .glow-red { box-shadow: 0 0 20px rgba(239, 68, 68, 0.18); }
+    .glow-amber { box-shadow: 0 0 20px rgba(245, 158, 11, 0.18); }
+    .glow-blue { box-shadow: 0 0 20px rgba(59, 130, 246, 0.18); }
+    .gradient-text {
+      background: linear-gradient(135deg, #4ade80 0%, #38bdf8 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    .btn-primary {
+      background: linear-gradient(135deg, #16a34a 0%, #15803d 100%);
+      transition: all 0.25s ease;
+    }
+    .btn-primary:hover {
+      background: linear-gradient(135deg, #22c55e 0%, #16a34a 100%);
+      transform: translateY(-1px);
+      box-shadow: 0 4px 16px rgba(34, 197, 94, 0.3);
+    }
+    .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; transform: none; box-shadow: none; }
+    .btn-secondary {
+      background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%);
+      transition: all 0.25s ease;
+    }
+    .btn-secondary:hover {
+      background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
+      transform: translateY(-1px);
+      box-shadow: 0 4px 16px rgba(59, 130, 246, 0.3);
+    }
+    .btn-secondary:disabled { opacity: 0.5; cursor: not-allowed; transform: none; box-shadow: none; }
+    .tab-btn { transition: all 0.2s ease; }
+    .metric-card { transition: all 0.25s ease; }
+    .metric-card:hover { transform: translateY(-2px); border-color: rgba(74, 222, 128, 0.5); }
+    @keyframes spin-slow { to { transform: rotate(360deg); } }
+    .spinner { animation: spin-slow 1s linear infinite; }
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: #11111b; }
+    ::-webkit-scrollbar-thumb { background: #45475a; border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: #585b70; }
+  </style>
+</head>
+<body class="font-sans text-gray-200 min-h-screen">
+
+  <!-- Top Header Navigation -->
+  <header class="glass border-b border-surface-700 sticky top-0 z-50">
+    <div class="max-w-7xl mx-auto px-6 py-3.5 flex items-center justify-between">
+      <div class="flex items-center gap-3">
+        <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-brand-500 to-sky-500 flex items-center justify-center shadow-lg shadow-brand-500/20">
+          <svg class="w-5 h-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"/>
+          </svg>
+        </div>
+        <div>
+          <h1 class="text-base font-bold gradient-text">Rice Arbitrage Desk</h1>
+          <p class="text-xs text-gray-400">Autonomous Discovery & Multi-Agent Negotiation</p>
+        </div>
+      </div>
+
+      <!-- Navigation Tabs -->
+      <div class="flex items-center gap-2 bg-surface-900/80 p-1 rounded-xl border border-surface-700">
+        <button id="tabCampaign" onclick="switchMainTab('campaign')" class="tab-btn px-4 py-1.5 rounded-lg text-xs font-semibold text-white bg-surface-700 shadow">
+          Trading & Outreach
+        </button>
+        <button id="tabDirectory" onclick="switchMainTab('directory')" class="tab-btn px-4 py-1.5 rounded-lg text-xs font-semibold text-gray-400 hover:text-white">
+          Marketplace Directory
+        </button>
+      </div>
+
+      <div class="flex items-center gap-3">
+        <div id="connectionStatus" class="flex items-center gap-2 text-xs bg-surface-850 px-3 py-1.5 rounded-lg border border-surface-700">
+          <span class="w-2 h-2 rounded-full bg-brand-500 animate-pulse-slow"></span>
+          <span class="text-gray-300 font-medium">Engine Online</span>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main Container -->
+  <main class="max-w-7xl mx-auto px-6 py-6">
+
+    <!-- ============================================================== -->
+    <!-- VIEW 1: TRADING & CAMPAIGN DISCOVERY VIEW                      -->
+    <!-- ============================================================== -->
+    <div id="viewCampaign" class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+
+      <!-- LEFT COLUMN: Campaign Ignition & Discovery Controls (7 cols) -->
+      <div class="lg:col-span-7 space-y-6">
+
+        <!-- Campaign Parameters & Ignition -->
+        <section class="glass rounded-2xl p-6 animate-fade-in shadow-xl">
+          <div class="flex items-center justify-between mb-4">
+            <div class="flex items-center gap-2">
+              <div class="p-2 rounded-lg bg-brand-500/10 text-brand-400">
+                <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z"/>
+                </svg>
+              </div>
+              <div>
+                <h2 class="text-sm font-bold text-white uppercase tracking-wider">Campaign Parameters</h2>
+                <p class="text-xs text-gray-400">Configure specifications and trigger automated counterparty discovery</p>
+              </div>
+            </div>
+            <span id="activeCampaignBadge" class="hidden text-xs font-mono bg-brand-900/40 text-brand-300 border border-brand-800/60 px-2.5 py-1 rounded-md"></span>
+          </div>
+
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div class="md:col-span-2">
+              <label class="block text-xs font-medium text-gray-300 mb-1.5">Commodity Spec</label>
+              <select id="commodity" class="w-full bg-surface-850 border border-surface-600 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:border-brand-500 text-gray-200">
+                <option value="Basmati 1121 Sella Rice 5% broken">Basmati 1121 Sella Rice (5% broken)</option>
+                <option value="Thai White Rice 5% broken">Thai White Rice (5% broken)</option>
+                <option value="Jasmine Rice 5% broken">Thai Hom Mali Jasmine Rice (5% broken)</option>
+                <option value="Vietnam 5% broken">Vietnam White Rice (5% broken)</option>
+              </select>
+            </div>
+            <div>
+              <label class="block text-xs font-medium text-gray-300 mb-1.5">Target Volume (MT)</label>
+              <input id="volume" type="number" value="500" class="w-full bg-surface-850 border border-surface-600 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:border-brand-500" />
+            </div>
+            <div>
+              <label class="block text-xs font-medium text-gray-300 mb-1.5">Min Net Profit Margin (%)</label>
+              <input id="margin" type="number" value="5.0" step="0.5" class="w-full bg-surface-850 border border-surface-600 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:border-brand-500" />
+            </div>
+            <div>
+              <label class="block text-xs font-medium text-gray-300 mb-1.5">Max Buy Variance vs FOB Benchmark (%)</label>
+              <input id="buyVariance" type="number" value="5.0" step="0.5" class="w-full bg-surface-850 border border-surface-600 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:border-brand-500" />
+            </div>
+            <div>
+              <label class="block text-xs font-medium text-gray-300 mb-1.5">Min Sell Premium vs CIF Benchmark (%)</label>
+              <input id="sellMargin" type="number" value="2.0" step="0.5" class="w-full bg-surface-850 border border-surface-600 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:border-brand-500" />
+            </div>
+          </div>
+
+          <button id="launchCampaignBtn" onclick="launchCampaignAndAutoOutreach()" class="btn-primary w-full mt-5 text-white font-semibold py-3.5 rounded-xl text-sm flex items-center justify-center gap-2 shadow-lg shadow-brand-500/20">
+            <svg id="launchSpinner" class="hidden w-4 h-4 spinner" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+            </svg>
+            <span id="launchBtnText">Launch Campaign & Auto-Outreach</span>
+          </button>
+        </section>
+
+        <!-- Discovered Counterparties & Outbound Communications -->
+        <section id="outreachSection" class="glass rounded-2xl p-6 animate-slide-up hidden shadow-xl">
+          <div class="flex items-center justify-between mb-4">
+            <div class="flex items-center gap-2">
+              <div class="p-2 rounded-lg bg-blue-500/10 text-blue-400">
+                <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"/>
+                </svg>
+              </div>
+              <div>
+                <h3 class="text-sm font-bold text-white uppercase tracking-wider">Autonomous Outreach Inquiries</h3>
+                <p class="text-xs text-gray-400">Targeted cold offers & RFQs generated for matched directory contacts</p>
+              </div>
+            </div>
+            <div class="flex gap-2">
+              <button id="btnViewBuyerDraft" onclick="showDraftTab('buyer')" class="px-3 py-1 rounded-lg text-xs font-semibold bg-blue-600/30 text-blue-300 border border-blue-500/40">
+                Buyer Cold Offer
+              </button>
+              <button id="btnViewSupplierDraft" onclick="showDraftTab('supplier')" class="px-3 py-1 rounded-lg text-xs font-semibold bg-surface-700 text-gray-400 border border-surface-600">
+                Supplier RFQ
+              </button>
+            </div>
+          </div>
+
+          <!-- Counterparty Highlights Cards -->
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4">
+            <div class="glass-light rounded-xl p-3 border border-blue-500/20">
+              <div class="flex items-center justify-between text-xs mb-1">
+                <span class="text-blue-400 font-semibold uppercase">Target Buyer</span>
+                <span id="cardBuyerPort" class="text-gray-400 font-mono text-[11px]">Jebel Ali</span>
+              </div>
+              <div id="cardBuyerName" class="text-sm font-bold text-white">Gulf Food Trading LLC</div>
+              <div id="cardBuyerContact" class="text-xs text-gray-400 truncate">procurement@gulffoodtrading.ae</div>
+              <div class="mt-2 text-xs text-blue-300">
+                Indicative CIF: <span id="cardIndicativeCif" class="font-bold text-white">$1,100.00/MT</span>
+              </div>
+            </div>
+
+            <div class="glass-light rounded-xl p-3 border border-purple-500/20">
+              <div class="flex items-center justify-between text-xs mb-1">
+                <span class="text-purple-400 font-semibold uppercase">Verified Supplier</span>
+                <span id="cardSupplierPort" class="text-gray-400 font-mono text-[11px]">Karachi / Mundra</span>
+              </div>
+              <div id="cardSupplierName" class="text-sm font-bold text-white">Indus Rice Mills Ltd.</div>
+              <div id="cardSupplierContact" class="text-xs text-gray-400 truncate">export@indusricemills.pk</div>
+              <div class="mt-2 text-xs text-purple-300">
+                Target Max FOB: <span id="cardTargetFob" class="font-bold text-white">$945.00/MT</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Outbound Message Draft Body -->
+          <div class="relative">
+            <pre id="outreachDraftText" class="whitespace-pre-wrap text-xs text-gray-300 leading-relaxed font-mono bg-surface-850 rounded-xl p-4 border border-surface-600 max-h-64 overflow-y-auto"></pre>
+          </div>
+
+          <!-- Negotiation Simulator Controls -->
+          <div class="mt-5 pt-4 border-t border-surface-700">
+            <div class="flex items-center justify-between mb-2">
+              <span class="text-xs font-semibold text-gray-300 uppercase">Simulate Negotiation Progression</span>
+              <span class="text-[11px] text-gray-500">Advances LangGraph trade threads</span>
+            </div>
+            <div class="grid grid-cols-1 sm:grid-cols-12 gap-3 items-center">
+              <div class="sm:col-span-6">
+                <select id="simScenario" class="w-full bg-surface-850 border border-surface-600 rounded-xl px-3 py-2 text-xs focus:outline-none focus:border-brand-500 text-gray-200">
+                  <option value="viable">Scenario: Viable Deal (Both agree at profitable spread)</option>
+                  <option value="lowball_buyer">Scenario: Lowball Buyer (Below Dynamic CIF Floor)</option>
+                  <option value="high_supplier">Scenario: Expensive Supplier (Above FOB Ceiling)</option>
+                </select>
+              </div>
+              <div class="sm:col-span-6">
+                <button id="simResponsesBtn" onclick="simulateCounterpartyResponses()" class="btn-secondary w-full text-white font-semibold py-2.5 rounded-xl text-xs flex items-center justify-center gap-2">
+                  <svg id="simSpinner" class="hidden w-3.5 h-3.5 spinner" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+                  </svg>
+                  <span id="simBtnText">Simulate Counterparty Responses</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+      </div>
+
+      <!-- RIGHT COLUMN: Market Grounding & Risk Evaluation (5 cols) -->
+      <div class="lg:col-span-5 space-y-6">
+
+        <!-- Live Market Grounding -->
+        <section class="glass rounded-2xl p-6 animate-fade-in shadow-xl">
+          <div class="flex items-center gap-2 mb-4">
+            <div class="p-2 rounded-lg bg-emerald-500/10 text-brand-400">
+              <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/>
+              </svg>
+            </div>
+            <div>
+              <h2 class="text-sm font-bold text-white uppercase tracking-wider">Dynamic Market Benchmarks</h2>
+              <p class="text-xs text-gray-400">Real-world index bounds & freight estimates</p>
+            </div>
+          </div>
+
+          <div class="grid grid-cols-2 gap-3">
+            <div class="metric-card glass-light rounded-xl p-3.5">
+              <div class="text-[11px] text-gray-400 uppercase">FOB Benchmark</div>
+              <div id="mktBenchmark" class="text-lg font-bold text-white mt-0.5">$900.00</div>
+              <div id="mktBenchmarkSrc" class="text-[10px] text-brand-400 mt-1">fallback cache</div>
+            </div>
+            <div class="metric-card glass-light rounded-xl p-3.5">
+              <div class="text-[11px] text-gray-400 uppercase">Container Freight</div>
+              <div id="mktFreight" class="text-lg font-bold text-white mt-0.5">$55.00</div>
+              <div class="text-[10px] text-gray-400 mt-1">Mundra to Jebel Ali</div>
+            </div>
+            <div class="metric-card glass-light rounded-xl p-3.5">
+              <div class="text-[11px] text-gray-400 uppercase">Landed Benchmark CIF</div>
+              <div id="mktLandedCif" class="text-lg font-bold text-white mt-0.5">$955.00</div>
+              <div class="text-[10px] text-gray-400 mt-1">FOB + Ocean Freight</div>
+            </div>
+            <div class="metric-card glass-light rounded-xl p-3.5">
+              <div class="text-[11px] text-gray-400 uppercase">Dynamic Buy Ceiling</div>
+              <div id="mktFobCeiling" class="text-lg font-bold text-amber-300 mt-0.5">$945.00</div>
+              <div class="text-[10px] text-gray-400 mt-1">Benchmark + 5.0%</div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Risk Evaluation & Deal Engine Panel -->
+        <section id="evalPanel" class="glass rounded-2xl p-6 animate-slide-up shadow-xl">
+          <div class="flex items-center justify-between mb-4">
+            <div class="flex items-center gap-2">
+              <div class="p-2 rounded-lg bg-amber-500/10 text-amber-400">
+                <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/>
+                </svg>
+              </div>
+              <div>
+                <h2 class="text-sm font-bold text-white uppercase tracking-wider">Deterministic Risk Engine</h2>
+                <p class="text-xs text-gray-400">Zero-risk rule & margin compliance barrier</p>
+              </div>
+            </div>
+            <span id="negotiationRoundBadge" class="text-[11px] bg-surface-700 text-gray-300 px-2 py-0.5 rounded-md font-mono">Round 0</span>
+          </div>
+
+          <!-- Status Card -->
+          <div id="dealStatusCard" class="rounded-xl p-4 mb-4 border border-surface-600 transition-all bg-surface-850/60">
+            <div class="flex items-center justify-between mb-2">
+              <span class="text-xs font-semibold text-gray-400 uppercase">Arbitrage Deal Status</span>
+              <span id="dealStatusBadge" class="status-badge px-3 py-1 rounded-full text-xs font-bold bg-surface-700 text-gray-300">
+                AWAITING LAUNCH
+              </span>
+            </div>
+
+            <!-- Margin Progress Bar -->
+            <div class="mt-3">
+              <div class="flex justify-between text-xs mb-1.5">
+                <span class="text-gray-400">Estimated Net Margin</span>
+                <span id="marginValue" class="font-bold text-white">0.00%</span>
+              </div>
+              <div class="h-2.5 bg-surface-700 rounded-full overflow-hidden">
+                <div id="marginFill" class="h-full rounded-full transition-all duration-700 ease-out bg-brand-500" style="width: 0%"></div>
+              </div>
+              <div class="flex justify-between text-[11px] mt-1 text-gray-500">
+                <span>0%</span>
+                <span id="targetMarginLabel">Target: 5.0%</span>
+                <span>20%</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Thread Statuses -->
+          <div class="grid grid-cols-2 gap-3 mb-4">
+            <div class="glass-light rounded-xl p-3 border border-surface-600">
+              <div class="text-[11px] text-gray-400 uppercase mb-1">Buyer Thread</div>
+              <div id="buyerThreadBadge" class="text-xs font-semibold text-blue-400">Awaiting</div>
+            </div>
+            <div class="glass-light rounded-xl p-3 border border-surface-600">
+              <div class="text-[11px] text-gray-400 uppercase mb-1">Supplier Thread</div>
+              <div id="supplierThreadBadge" class="text-xs font-semibold text-purple-400">Awaiting</div>
+            </div>
+          </div>
+
+          <!-- Evaluation Reason Box -->
+          <div id="evalReasonBox" class="p-3 rounded-xl bg-surface-850 border border-surface-600 text-xs text-gray-300 leading-relaxed">
+            Configure parameters and click "Launch Campaign & Auto-Outreach" to discover market counterparties.
+          </div>
+        </section>
+
+        <!-- Final Agent Agreement / Response Panel -->
+        <section id="finalResponsePanel" class="glass rounded-2xl p-6 animate-slide-up hidden shadow-xl">
+          <div class="flex items-center justify-between mb-3">
+            <div class="flex items-center gap-2">
+              <div class="p-1.5 rounded-lg bg-brand-500/10 text-brand-400">
+                <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M8 7v8a2 2 0 002 2h6M8 7V5a2 2 0 012-2h4.586a1 1 0 01.707.293l4.414 4.414a1 1 0 01.293.707V15a2 2 0 01-2 2h-2M8 7H6a2 2 0 00-2 2v10a2 2 0 002 2h8a2 2 0 002-2v-2"/>
+                </svg>
+              </div>
+              <h3 class="text-xs font-bold text-white uppercase tracking-wider">Formal Agent Communication</h3>
+            </div>
+            <div class="flex gap-1.5">
+              <button id="btnViewBuyerResponse" onclick="showResponseTab('buyer')" class="px-2.5 py-1 rounded-md text-[11px] font-semibold bg-brand-600/30 text-brand-300 border border-brand-500/40">
+                Buyer SCO
+              </button>
+              <button id="btnViewSupplierResponse" onclick="showResponseTab('supplier')" class="px-2.5 py-1 rounded-md text-[11px] font-semibold bg-surface-700 text-gray-400 border border-surface-600">
+                Supplier PI
+              </button>
+            </div>
+          </div>
+          <pre id="finalResponseText" class="whitespace-pre-wrap text-xs text-gray-300 leading-relaxed font-mono bg-surface-850 rounded-xl p-3.5 border border-surface-600 max-h-56 overflow-y-auto"></pre>
+        </section>
+
+        <!-- Activity Log -->
+        <section class="glass rounded-2xl p-6 shadow-xl">
+          <div class="flex items-center gap-2 mb-3">
+            <svg class="w-4 h-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
+            </svg>
+            <h2 class="text-xs font-bold uppercase tracking-wider text-gray-400">Desk Activity Audit</h2>
+          </div>
+          <div id="activityLog" class="space-y-1.5 max-h-40 overflow-y-auto text-xs">
+            <div class="text-gray-500 italic">Ready to ignite trading desk...</div>
+          </div>
+        </section>
+
+      </div>
+    </div>
+
+    <!-- ============================================================== -->
+    <!-- VIEW 2: MARKETPLACE DIRECTORY VIEW                             -->
+    <!-- ============================================================== -->
+    <div id="viewDirectory" class="hidden space-y-6">
+
+      <!-- Directory Header Banner -->
+      <div class="glass rounded-2xl p-6">
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div>
+            <h2 class="text-lg font-bold text-white">Marketplace Counterparty Directory</h2>
+            <p class="text-xs text-gray-400 mt-0.5">Pre-verified commodity trading counterparties across the Middle East and Asian origination hubs</p>
+          </div>
+          <div class="flex items-center gap-2">
+            <span class="text-xs bg-surface-850 px-3 py-1.5 rounded-lg border border-surface-700 text-gray-300">
+              Verified Buyers: <strong id="buyersCount" class="text-blue-400">--</strong>
+            </span>
+            <span class="text-xs bg-surface-850 px-3 py-1.5 rounded-lg border border-surface-700 text-gray-300">
+              Verified Mills/Suppliers: <strong id="suppliersCount" class="text-purple-400">--</strong>
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Buyers Grid -->
+      <section>
+        <div class="flex items-center gap-2 mb-4">
+          <div class="w-2.5 h-2.5 rounded-full bg-blue-500"></div>
+          <h3 class="text-sm font-bold uppercase tracking-wider text-blue-400">Middle East Buyers & Importers</h3>
+        </div>
+        <div id="buyersGrid" class="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <!-- Loaded dynamically -->
+        </div>
+      </section>
+
+      <!-- Suppliers Grid -->
+      <section>
+        <div class="flex items-center gap-2 mb-4">
+          <div class="w-2.5 h-2.5 rounded-full bg-purple-500"></div>
+          <h3 class="text-sm font-bold uppercase tracking-wider text-purple-400">South & Southeast Asian Rice Mills / Exporters</h3>
+        </div>
+        <div id="suppliersGrid" class="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <!-- Loaded dynamically -->
+        </div>
+      </section>
+
+    </div>
+
+  </main>
+
+  <!-- Frontend Logic -->
+  <script>
+    // State
+    let currentCampaignId = null;
+    let campaignData = null;
+    let directoryData = { buyers: [], suppliers: [] };
+    let latestSimulation = null;
+    let activeDraftTab = 'buyer';
+    let activeResponseTab = 'buyer';
+
+    // Init
+    document.addEventListener('DOMContentLoaded', async () => {
+      await loadDirectory();
+    });
+
+    // Tab Switcher
+    function switchMainTab(tab) {
+      const viewCampaign = document.getElementById('viewCampaign');
+      const viewDirectory = document.getElementById('viewDirectory');
+      const tabCampaign = document.getElementById('tabCampaign');
+      const tabDirectory = document.getElementById('tabDirectory');
+
+      if (tab === 'campaign') {
+        viewCampaign.classList.remove('hidden');
+        viewDirectory.classList.add('hidden');
+        tabCampaign.className = 'tab-btn px-4 py-1.5 rounded-lg text-xs font-semibold text-white bg-surface-700 shadow';
+        tabDirectory.className = 'tab-btn px-4 py-1.5 rounded-lg text-xs font-semibold text-gray-400 hover:text-white';
+      } else {
+        viewCampaign.classList.add('hidden');
+        viewDirectory.classList.remove('hidden');
+        tabDirectory.className = 'tab-btn px-4 py-1.5 rounded-lg text-xs font-semibold text-white bg-surface-700 shadow';
+        tabCampaign.className = 'tab-btn px-4 py-1.5 rounded-lg text-xs font-semibold text-gray-400 hover:text-white';
+      }
+    }
+
+    // Load Marketplace Directory
+    async function loadDirectory() {
+      try {
+        const res = await fetch('/api/directory');
+        directoryData = await res.json();
+        renderDirectory(directoryData);
+        addLog(`Marketplace directory loaded (${directoryData.buyers.length} buyers, ${directoryData.suppliers.length} suppliers).`, 'info');
+      } catch (err) {
+        addLog('Error loading marketplace directory: ' + err.message, 'error');
+      }
+    }
+
+    // Render Directory Cards
+    function renderDirectory(dir) {
+      document.getElementById('buyersCount').textContent = dir.buyers.length;
+      document.getElementById('suppliersCount').textContent = dir.suppliers.length;
+
+      const buyersContainer = document.getElementById('buyersGrid');
+      buyersContainer.innerHTML = dir.buyers.map(b => `
+        <div class="glass rounded-xl p-5 border border-blue-500/20 hover:border-blue-500/50 transition-all">
+          <div class="flex items-start justify-between">
+            <div>
+              <span class="text-[10px] font-mono uppercase bg-blue-900/40 text-blue-300 px-2 py-0.5 rounded border border-blue-800/50">${b.id}</span>
+              <h4 class="text-sm font-bold text-white mt-1.5">${b.name}</h4>
+              <p class="text-xs text-gray-400">${b.country} &bull; Destination: <span class="text-blue-300 font-semibold">${b.port}</span></p>
+            </div>
+            <div class="text-right">
+              <span class="text-xs font-bold text-amber-400">&#9733; ${b.reputation_score}</span>
+              <div class="text-[11px] text-gray-500 mt-0.5">Cap: ${b.typical_volume_mt} MT</div>
+            </div>
+          </div>
+          <div class="mt-3 pt-3 border-t border-surface-700/60 text-xs">
+            <div class="text-gray-400"><strong class="text-gray-300">Contact:</strong> ${b.contact_name}</div>
+            <div class="text-gray-400 truncate"><strong class="text-gray-300">Email:</strong> ${b.contact_email}</div>
+            <div class="mt-2 flex flex-wrap gap-1">
+              ${b.preferred_commodities.map(c => `<span class="text-[10px] bg-surface-700 text-gray-300 px-2 py-0.5 rounded">${c}</span>`).join('')}
+            </div>
+          </div>
+        </div>
+      `).join('');
+
+      const suppliersContainer = document.getElementById('suppliersGrid');
+      suppliersContainer.innerHTML = dir.suppliers.map(s => `
+        <div class="glass rounded-xl p-5 border border-purple-500/20 hover:border-purple-500/50 transition-all">
+          <div class="flex items-start justify-between">
+            <div>
+              <span class="text-[10px] font-mono uppercase bg-purple-900/40 text-purple-300 px-2 py-0.5 rounded border border-purple-800/50">${s.id}</span>
+              <h4 class="text-sm font-bold text-white mt-1.5">${s.name}</h4>
+              <p class="text-xs text-gray-400">${s.country} &bull; Origin: <span class="text-purple-300 font-semibold">${s.port}</span></p>
+            </div>
+            <div class="text-right">
+              <span class="text-xs font-bold text-amber-400">&#9733; ${s.reputation_score}</span>
+              <div class="text-[11px] text-gray-500 mt-0.5">Cap: ${s.typical_volume_mt} MT</div>
+            </div>
+          </div>
+          <div class="mt-3 pt-3 border-t border-surface-700/60 text-xs">
+            <div class="text-gray-400"><strong class="text-gray-300">Contact:</strong> ${s.contact_name}</div>
+            <div class="text-gray-400 truncate"><strong class="text-gray-300">Email:</strong> ${s.contact_email}</div>
+            <div class="mt-2 flex flex-wrap gap-1">
+              ${s.preferred_commodities.map(c => `<span class="text-[10px] bg-surface-700 text-gray-300 px-2 py-0.5 rounded">${c}</span>`).join('')}
+            </div>
+          </div>
+        </div>
+      `).join('');
+    }
+
+    // Launch Campaign & Trigger Autonomous Discovery + Auto-Outreach
+    async function launchCampaignAndAutoOutreach() {
+      const btn = document.getElementById('launchCampaignBtn');
+      const spinner = document.getElementById('launchSpinner');
+      const btnText = document.getElementById('launchBtnText');
+
+      btn.disabled = true;
+      spinner.classList.remove('hidden');
+      btnText.textContent = 'Discovering & Drafting...';
+
+      const commodityMap = {
+        'Basmati 1121 Sella Rice 5% broken': 'basmati_1121',
+        'Thai White Rice 5% broken': 'thai_white',
+        'Jasmine Rice 5% broken': 'thai_jasmine',
+        'Vietnam 5% broken': 'vietnam_5',
+      };
+      const commodity = document.getElementById('commodity').value;
+
+      try {
+        const res = await fetch('/api/campaigns', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            commodity,
+            target_volume_mt: parseFloat(document.getElementById('volume').value),
+            target_margin_pct: parseFloat(document.getElementById('margin').value),
+            max_buy_variance_pct: parseFloat(document.getElementById('buyVariance').value),
+            min_sell_margin_pct: parseFloat(document.getElementById('sellMargin').value),
+            benchmark_index: commodityMap[commodity] || 'basmati_1121',
+          }),
+        });
+        campaignData = await res.json();
+        currentCampaignId = campaignData.campaign_id;
+
+        // Fetch full campaign state for drafts
+        const stateRes = await fetch(`/api/campaigns/${currentCampaignId}`);
+        const fullState = await stateRes.json();
+
+        // Update UI
+        document.getElementById('activeCampaignBadge').textContent = currentCampaignId;
+        document.getElementById('activeCampaignBadge').classList.remove('hidden');
+
+        // Market Data
+        document.getElementById('mktBenchmark').textContent = `$${campaignData.benchmark_fob_usd.toFixed(2)}`;
+        document.getElementById('mktFreight').textContent = `$${campaignData.freight_cost_usd.toFixed(2)}`;
+        document.getElementById('mktLandedCif').textContent = `$${(campaignData.benchmark_fob_usd + campaignData.freight_cost_usd).toFixed(2)}`;
+        const buyVar = parseFloat(document.getElementById('buyVariance').value) || 5;
+        document.getElementById('mktFobCeiling').textContent = `$${(campaignData.benchmark_fob_usd * (1 + buyVar/100)).toFixed(2)}`;
+        document.getElementById('mktBenchmarkSrc').textContent = campaignData.benchmark_source.replace('_', ' ');
+
+        // Counterparty cards
+        if (campaignData.primary_buyer) {
+          document.getElementById('cardBuyerName').textContent = campaignData.primary_buyer.name;
+          document.getElementById('cardBuyerPort').textContent = campaignData.primary_buyer.port;
+          document.getElementById('cardBuyerContact').textContent = campaignData.primary_buyer.contact_email;
+          document.getElementById('cardIndicativeCif').textContent = `$${campaignData.indicative_buyer_cif.toFixed(2)}/MT`;
+        }
+        if (campaignData.primary_supplier) {
+          document.getElementById('cardSupplierName').textContent = campaignData.primary_supplier.name;
+          document.getElementById('cardSupplierPort').textContent = campaignData.primary_supplier.port;
+          document.getElementById('cardSupplierContact').textContent = campaignData.primary_supplier.contact_email;
+          document.getElementById('cardTargetFob').textContent = `$${campaignData.supplier_target_fob.toFixed(2)}/MT`;
+        }
+
+        // Outreach drafts
+        window._buyerDraft = fullState.buyer_draft;
+        window._supplierDraft = fullState.supplier_draft;
+        showDraftTab('buyer');
+        document.getElementById('outreachSection').classList.remove('hidden');
+
+        // Status update
+        updateStatusDisplay({
+          deal_status: 'prospecting',
+          margin_pct: 0.0,
+          buyer_thread_status: 'outreach_sent',
+          supplier_thread_status: 'rfq_sent',
+          evaluation_reason: `Autonomous discovery matched ${campaignData.discovered_buyers_count} buyer(s) and ${campaignData.discovered_suppliers_count} supplier(s). Initial cold offer and RFQ dispatched.`,
+          negotiation_round: 0,
+        });
+
+        addLog(`Campaign ${currentCampaignId} ignited. Discovered ${campaignData.discovered_buyers_count} buyers and ${campaignData.discovered_suppliers_count} suppliers.`, 'success');
+      } catch (err) {
+        addLog('Failed to ignite campaign: ' + err.message, 'error');
+      } finally {
+        btn.disabled = false;
+        spinner.classList.add('hidden');
+        btnText.textContent = 'Re-Ignite Discovery & Outreach';
+      }
+    }
+
+    // Toggle between Buyer Cold Offer and Supplier RFQ in Outreach Section
+    function showDraftTab(tab) {
+      activeDraftTab = tab;
+      const draftEl = document.getElementById('outreachDraftText');
+      const btnB = document.getElementById('btnViewBuyerDraft');
+      const btnS = document.getElementById('btnViewSupplierDraft');
+
+      if (tab === 'buyer') {
+        draftEl.textContent = window._buyerDraft || 'Buyer outreach draft pending...';
+        btnB.className = 'px-3 py-1 rounded-lg text-xs font-semibold bg-blue-600/30 text-blue-300 border border-blue-500/40';
+        btnS.className = 'px-3 py-1 rounded-lg text-xs font-semibold bg-surface-700 text-gray-400 border border-surface-600';
+      } else {
+        draftEl.textContent = window._supplierDraft || 'Supplier RFQ draft pending...';
+        btnS.className = 'px-3 py-1 rounded-lg text-xs font-semibold bg-purple-600/30 text-purple-300 border border-purple-500/40';
+        btnB.className = 'px-3 py-1 rounded-lg text-xs font-semibold bg-surface-700 text-gray-400 border border-surface-600';
+      }
+    }
+
+    // Toggle between Buyer SCO and Supplier PI in Final Response Section
+    function showResponseTab(tab) {
+      activeResponseTab = tab;
+      const respEl = document.getElementById('finalResponseText');
+      const btnB = document.getElementById('btnViewBuyerResponse');
+      const btnS = document.getElementById('btnViewSupplierResponse');
+
+      if (tab === 'buyer') {
+        respEl.textContent = window._latestBuyerResp || 'No buyer response generated.';
+        btnB.className = 'px-2.5 py-1 rounded-md text-[11px] font-semibold bg-brand-600/30 text-brand-300 border border-brand-500/40';
+        btnS.className = 'px-2.5 py-1 rounded-md text-[11px] font-semibold bg-surface-700 text-gray-400 border border-surface-600';
+      } else {
+        respEl.textContent = window._latestSupplierResp || 'No supplier response generated.';
+        btnS.className = 'px-2.5 py-1 rounded-md text-[11px] font-semibold bg-purple-600/30 text-purple-300 border border-purple-500/40';
+        btnB.className = 'px-2.5 py-1 rounded-md text-[11px] font-semibold bg-surface-700 text-gray-400 border border-surface-600';
+      }
+    }
+
+    // Simulate Counterparty Inbound Responses & Run Negotiation Graph
+    async function simulateCounterpartyResponses() {
+      if (!currentCampaignId) {
+        addLog('Please launch a campaign first.', 'warn');
+        return;
+      }
+
+      const btn = document.getElementById('simResponsesBtn');
+      const spinner = document.getElementById('simSpinner');
+      const btnText = document.getElementById('simBtnText');
+      const scenario = document.getElementById('simScenario').value;
+
+      btn.disabled = true;
+      spinner.classList.remove('hidden');
+      btnText.textContent = 'Negotiating...';
+
+      try {
+        const res = await fetch(`/api/campaigns/${currentCampaignId}/simulate-responses`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ scenario }),
+        });
+        const data = await res.json();
+        latestSimulation = data;
+
+        // Update status display
+        updateStatusDisplay({
+          deal_status: data.deal_status,
+          margin_pct: data.net_margin_pct || 0.0,
+          buyer_thread_status: data.deal_status === 'closed' ? 'terms_accepted' : (data.deal_status === 'negotiating_buyer' ? 'counter_sent' : 'inquiry_parsed'),
+          supplier_thread_status: data.deal_status === 'closed' ? 'allocation_locked' : (data.deal_status === 'negotiating_supplier' ? 'counter_sent' : 'quote_parsed'),
+          evaluation_reason: data.evaluation_reason,
+          negotiation_round: data.negotiation_round,
+        });
+
+        // Update final response panel
+        window._latestBuyerResp = data.agent_outbound_drafts.buyer_draft;
+        window._latestSupplierResp = data.agent_outbound_drafts.supplier_draft;
+        showResponseTab('buyer');
+        document.getElementById('finalResponsePanel').classList.remove('hidden');
+
+        // Log result
+        addLog(
+          `Round ${data.negotiation_round} simulated (${scenario}). Deal: ${data.deal_status.toUpperCase()}, Net Margin: ${data.net_margin_pct.toFixed(2)}%`,
+          data.is_deal_viable ? 'success' : 'warn'
+        );
+      } catch (err) {
+        addLog('Simulation error: ' + err.message, 'error');
+      } finally {
+        btn.disabled = false;
+        spinner.classList.add('hidden');
+        btnText.textContent = 'Simulate Counterparty Responses';
+      }
+    }
+
+    // Helper: Update Status and Metric Cards
+    function updateStatusDisplay(state) {
+      // Badge config
+      const statusConfig = {
+        'prospecting': { text: 'OUTREACH ACTIVE', class: 'bg-blue-900/40 text-blue-300 border border-blue-700/50' },
+        'evaluating': { text: 'EVALUATING RISK', class: 'bg-amber-900/50 text-amber-300 border border-amber-700/50' },
+        'negotiating_buyer': { text: 'COUNTERING BUYER', class: 'bg-amber-900/50 text-amber-300 border border-amber-700/50' },
+        'negotiating_supplier': { text: 'COUNTERING SUPPLIER', class: 'bg-amber-900/50 text-amber-300 border border-amber-700/50' },
+        'approved': { text: 'APPROVED', class: 'bg-brand-900/50 text-brand-300 border border-brand-700/50 glow-green' },
+        'closed': { text: 'DEAL CLOSED', class: 'bg-brand-900/50 text-brand-300 border border-brand-700/50 glow-green' },
+        'rejected': { text: 'REJECTED', class: 'bg-red-900/50 text-red-300 border border-red-700/50 glow-red' },
+      };
+
+      const sc = statusConfig[state.deal_status] || statusConfig['prospecting'];
+      const badge = document.getElementById('dealStatusBadge');
+      badge.textContent = sc.text;
+      badge.className = `status-badge px-3 py-1 rounded-full text-xs font-bold ${sc.class}`;
+
+      // Margin
+      const margin = state.margin_pct || 0.0;
+      const target = parseFloat(document.getElementById('margin').value) || 5;
+      const marginVal = document.getElementById('marginValue');
+      marginVal.textContent = `${margin.toFixed(2)}%`;
+      marginVal.className = `font-bold ${margin >= target ? 'text-brand-400' : (margin > 0 ? 'text-amber-400' : 'text-gray-400')}`;
+
+      const fillPct = Math.min(Math.max(margin / 20 * 100, 0), 100);
+      const fill = document.getElementById('marginFill');
+      fill.style.width = `${fillPct}%`;
+      fill.className = `h-full rounded-full transition-all duration-700 ease-out ${margin >= target ? 'bg-gradient-to-r from-brand-600 to-brand-400' : 'bg-gradient-to-r from-red-600 to-amber-400'}`;
+      document.getElementById('targetMarginLabel').textContent = `Target: ${target.toFixed(1)}%`;
+
+      // Threads
+      const threadMap = {
+        'awaiting_inquiry': 'Awaiting Inquiry',
+        'outreach_sent': 'Outreach Sent',
+        'inquiry_parsed': 'Offer Parsed',
+        'counter_sent': 'Counter Sent',
+        'terms_accepted': 'Terms Accepted',
+        'awaiting_quote': 'Awaiting Quote',
+        'rfq_sent': 'RFQ Sent',
+        'quote_parsed': 'Quote Parsed',
+        'allocation_locked': 'Allocation Locked (Zero-Risk)',
+      };
+      document.getElementById('buyerThreadBadge').textContent = threadMap[state.buyer_thread_status] || state.buyer_thread_status;
+      document.getElementById('supplierThreadBadge').textContent = threadMap[state.supplier_thread_status] || state.supplier_thread_status;
+
+      // Evaluation Reason
+      document.getElementById('evalReasonBox').textContent = state.evaluation_reason || 'Inbound terms compliant with dynamic market bounds.';
+      document.getElementById('negotiationRoundBadge').textContent = `Round ${state.negotiation_round || 0}`;
+    }
+
+    // Logger
+    function addLog(msg, type = 'info') {
+      const log = document.getElementById('activityLog');
+      const time = new Date().toLocaleTimeString();
+      const colors = {
+        'info': 'text-gray-400',
+        'success': 'text-brand-400',
+        'warn': 'text-amber-400',
+        'error': 'text-red-400',
+      };
+      const dots = {
+        'info': 'bg-gray-500',
+        'success': 'bg-brand-500',
+        'warn': 'bg-amber-500',
+        'error': 'bg-red-500',
+      };
+
+      if (log.querySelector('.italic')) log.innerHTML = '';
+
+      const el = document.createElement('div');
+      el.className = `flex items-start gap-2 ${colors[type] || 'text-gray-400'} animate-fade-in`;
+      el.innerHTML = `
+        <span class="w-1.5 h-1.5 rounded-full ${dots[type] || 'bg-gray-500'} mt-1.5 flex-shrink-0"></span>
+        <span class="text-gray-600 flex-shrink-0 font-mono text-[10px]">${time}</span>
+        <span>${msg}</span>
+      `;
+      log.prepend(el);
+    }
+  </script>
+</body>
+</html>
