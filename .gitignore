@@ -23,5 +23,7 @@ ENV/
 # Testing / Cache
 .pytest_cache/
 .coverage
-htmlcov/
 *.log
+.cache/
+market_cache.json
+documentation.md

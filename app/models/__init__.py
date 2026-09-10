@@ -1,20 +1,21 @@
 """
-Legacy schemas module — maintained as a backward-compatibility shim.
-All models have been modularized under `app.models.*`.
+Domain models package for rice commodity arbitrage.
 """
 
-from app.models import (
+from app.models.campaign import (
     BuyerThreadStatus,
     CampaignConfig,
-    Counterparty,
-    CreateCampaignRequest,
     DealStatus,
+    SupplierThreadStatus,
+)
+from app.models.counterparty import Counterparty
+from app.models.state import TradeState
+from app.models.trade import (
+    CreateCampaignRequest,
     ParsedTradeEmail,
     SimulateEmailRequest,
     SimulateEmailResponse,
     SimulateResponsesRequest,
-    SupplierThreadStatus,
-    TradeState,
 )
 
 __all__ = [
