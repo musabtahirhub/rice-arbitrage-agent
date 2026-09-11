@@ -195,14 +195,16 @@ Provides verified buyers across the Middle East (UAE, Saudi Arabia) and Asian mi
 
 ## 6. Market Benchmarks & Freight (`app/market.py`)
 
-Provides live FOB benchmark prices:
-- `Basmati 1121`: $900.00/MT FOB
-- `Super Kernel Basmati`: $980.00/MT FOB
-- `Thai White 5%`: $520.00/MT FOB
-- `Jasmine Rice`: $780.00/MT FOB
-- `Vietnam 5%`: $490.00/MT FOB
+Fetches real-world benchmark export rates directly from public market boards (Thai Rice Exporters Association: `http://www.thairiceexporters.or.th/price_eng.html`) with an integrated 6-hour disk cache (`market_cache.json`) and resilient baseline fallbacks:
+- `Thai White 5%`: Extracted from live table ($496.00/MT FOB)
+- `Thai White 25%`: Extracted from live table ($397.00/MT FOB)
+- `Thai Hom Mali / Jasmine`: Extracted from live table ($1170.00 - $1264.00/MT FOB)
+- `Pathumthani Fragrant`: Extracted from live table ($478.00/MT FOB)
+- `Basmati 1121`: $900.00/MT FOB baseline
+- `Super Kernel Basmati`: $980.00/MT FOB baseline
+- `Vietnam 5%`: $490.00/MT FOB baseline
 
-Container freight estimator with port pairs (Karachi, Mundra, Bangkok, Ho Chi Minh to Jebel Ali, Dammam).
+Dynamic container freight estimator calculating port-to-port ocean rates (Karachi, Mundra, Bangkok, Ho Chi Minh to Jebel Ali, Dammam) with fuel/bunker surcharges (BAF) and automatic rate caching.
 
 ---
 

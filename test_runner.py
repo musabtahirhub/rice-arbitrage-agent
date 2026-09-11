@@ -44,16 +44,42 @@ def test_market_and_directory():
     assert_true(len(suppliers) >= 1, "Found matching Basmati suppliers")
     assert_true(any("Indus Rice" in s.name for s in suppliers), "Indus Rice Mills found in directory")
 
-    # Market Benchmark
+    # Market Benchmark & Live Web Scraper
+    from app.market import fetch_live_market_data, parse_thai_rice_html, CACHE_FILE
+    rates = fetch_live_market_data()
+    assert_true(len(rates) >= 5, "Market rates dictionary loaded")
+    assert_true(CACHE_FILE.exists(), "market_cache.json created on disk")
+
+    # Verify HTML parser on Thai Rice Exporters format
+    sample_html = """
+    <table>
+    <tr><td>Item</td><td>9 Sep 2026</td></tr>
+    <tr><td><img src="img/price_eng-1.jpg"></td><td>1264</td></tr>
+    <tr><td>1170</td></tr>
+    <tr><td>478</td></tr>
+    <tr><td>640</td></tr>
+    <tr><td>496</td></tr>
+    <tr><td>490</td></tr>
+    <tr><td>469</td></tr>
+    <tr><td>397</td></tr>
+    </table>
+    """
+    parsed = parse_thai_rice_html(sample_html)
+    assert_true(parsed.get("thai white 5%") == 496.0, f"HTML parser extracted Thai White 5%: {parsed.get('thai white 5%')}")
+    assert_true(parsed.get("pathumthani fragrant") == 478.0, "HTML parser extracted Pathumthani Fragrant")
+
     basmati_rate = get_benchmark_rate("Basmati 1121", 5.0)
     assert_true(basmati_rate == 900.0, f"Basmati benchmark is $900/MT (got {basmati_rate})")
 
     thai_rate = get_benchmark_rate("Thai White 5%", 5.0)
-    assert_true(thai_rate == 520.0, f"Thai White benchmark is $520/MT (got {thai_rate})")
+    assert_true(thai_rate > 0.0, f"Thai White benchmark is valid (got ${thai_rate}/MT)")
 
-    # Freight
-    freight = estimate_freight("Karachi", "Jebel Ali")
-    assert_true(freight == 45.0, f"Karachi -> Jebel Ali freight is $45/MT (got {freight})")
+    # Dynamic Freight with fuel surcharge
+    freight_base = estimate_freight("Karachi", "Jebel Ali")
+    assert_true(freight_base == 45.0, f"Karachi -> Jebel Ali base freight is $45/MT (got {freight_base})")
+
+    freight_baf = estimate_freight("Karachi", "Jebel Ali", fuel_surcharge_pct=4.0)
+    assert_true(freight_baf == 46.8, f"Karachi -> Jebel Ali freight with +4% fuel surcharge is $46.80/MT (got {freight_baf})")
 
 
 def test_deterministic_math_engine():
