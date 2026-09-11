@@ -1,48 +1,31 @@
 # 🌾 Autonomous Commodity Arbitrage Desk (Rice Trading Agent)
 
-An autonomous multi-agent physical commodity arbitrage system engineered for international rice trading between **South/Southeast Asian origin mills** (Pakistan, India, Thailand, Vietnam) and **Middle Eastern import hubs** (UAE, Saudi Arabia).
-
-The system integrates **dynamic market benchmark grounding**, **autonomous counterparty discovery**, **parallel agent negotiation**, and **deterministic zero-risk enforcement**.
+A clean, educational, mid-level multi-agent commodity arbitrage system demonstrating physical grain trading between **Asian mills** (Pakistan, Thailand, Vietnam) and **Middle Eastern institutional buyers** (UAE, Saudi Arabia).
 
 ---
 
-## 🚀 Key Architectural Pillars
+## 🎯 Architectural Principles
 
-### 1. Dynamic Market Grounding (`app/market_data.py`)
-- Replaces hardcoded price boundaries with live benchmark indices and container freight estimation.
-- Supports canonical indices:
-  - **Basmati 1121 Sella Rice** (FOB Karachi / Mundra)
-  - **Thai White Rice 5% Broken** (FOB Bangkok)
-  - **Thai Hom Mali Jasmine Rice** (FOB Bangkok)
-  - **Vietnam White Rice 5% Broken** (FOB Ho Chi Minh)
-- Ocean container freight matrix (TEU 20ft container lots) between origination ports and destination ports (Jebel Ali, Dammam).
-- Integrated resilient fallback caching with timestamped offline market defaults.
+1. **Separation of Brains**:
+   - **Large Language Model (Gemini)**: Scoped strictly to unstructured text parsing (extracting quantities, prices, incoterms from raw emails) and polite business correspondence drafting.
+   - **Deterministic Math Engine (Pure Python)**: Calculates landed costs, ocean freight, dynamic ceilings/floors, and net profit margins with zero risk of LLM hallucination.
 
-### 2. Autonomous Counterparty Discovery & Campaign Ignition (`app/directory.py`, `app/agents/discovery.py`)
-- **Marketplace Directory**: Pre-verified data store of Middle Eastern buyers and Asian rice mills/exporters, containing port specifications, preferred commodity varieties, volume capacities, and reputation ratings.
-- **Automated Campaign Ignition**:
-  - Automatically queries directory for counterparties matching campaign specifications.
-  - Computes dynamic indicative pricing:
-    - **Landed Benchmark CIF** = $\text{Benchmark FOB} + \text{Ocean Freight}$
-    - **Indicative Buyer Offer CIF** = $\text{Landed CIF} \times (1 + \text{Target Margin} + \text{Sell Premium})$
-    - **Supplier Target FOB Ceiling** = $\text{Benchmark FOB} \times (1 + \text{Max Variance Tolerance})$
-  - Concurrently drafts tailored **Buyer Cold Outreach** emails and **Supplier RFQs** (Request for Quotations).
+2. **The Zero-Risk Invariant**:
+   - The intermediary desk **never commits to a buyer** or accepts a purchase order until matching supplier volume allocation is confirmed and locked. This eliminates short squeeze risk in volatile physical commodity markets.
 
-### 3. Multi-Agent Orchestration & Deterministic Risk Barrier (`app/agents/orchestrator.py`, `app/arbitrage_engine.py`)
-- **Buyer Agent (`app/agents/buyer_agent.py`)**: Parses buyer CIF inquiries and drafts non-binding Soft Corporate Offers (SCO) or counter-offers.
-- **Supplier Agent (`app/agents/supplier_agent.py`)**: Parses supplier FOB quotes and drafts RFQ counters or Proforma Invoice (PI) confirmation requests.
-- **Deterministic Risk Worker Barrier**:
-  - LLMs only parse text and draft letters; **all mathematical calculations and deal evaluations are executed strictly in pure Python**.
-  - **Zero-Risk Invariant**: Supplier allocation **must be locked before** buyer terms are accepted to eliminate short squeeze exposure.
-  - Rejects supplier quotes exceeding the dynamic FOB ceiling and buyer bids below the dynamic CIF floor.
+3. **Dynamic Market Grounding**:
+   - Hardcoded price boundaries are replaced with live benchmark indices (Basmati 1121, Thai White 5%, Jasmine, Vietnam 5%) and container freight matrices.
+   - **FOB Ceiling** = `Benchmark FOB * (1 + Max Variance %)`
+   - **Landed Cost** = `Supplier FOB + Ocean Freight + Operating Buffer`
+   - **CIF Floor** = `Landed Cost at Ceiling * (1 + Target Margin %)`
+   - **Net Margin %** = `((Buyer CIF - Landed Cost) / Landed Cost) * 100`
 
-### 4. Interactive Web Dashboard & FastAPI Backend (`app/main.py`, `app/static/index.html`)
-- High-performance FastAPI application serving a modern single-page dashboard.
-- Styled with Tailwind CSS CDN and custom dark glassmorphism.
-- Features:
-  - **Marketplace Directory Explorer**: Browse registered buyers and suppliers with badges for ports, commodities, and ratings.
-  - **One-Click Campaign Ignition & Auto-Outreach**: Launches discovery and renders outbound buyer offers and supplier RFQs.
-  - **Simulation Engine**: Triggers realistic counterparty negotiation responses (`viable`, `lowball_buyer`, `high_supplier`) and visualizes real-time margin tracking and contract drafts.
+4. **Transparent LangGraph State Machine**:
+   - A single, self-contained `StateGraph` in `app/workflow.py` coordinates the entire negotiation pipeline:
+     - `parse_incoming_email` ➔ `fetch_market_data` ➔ `evaluate_risk` ➔ Conditional Router:
+       - If viable: `confirm_deal` (locks supplier first, then confirms buyer)
+       - If buyer price low: `counter_buyer` (counters firmly at CIF floor)
+       - If supplier price high: `counter_supplier` (counters firmly at FOB ceiling)
 
 ---
 
@@ -51,102 +34,110 @@ The system integrates **dynamic market benchmark grounding**, **autonomous count
 ```text
 rice-arbitrage-agent/
 ├── app/
-│   ├── agents/
-│   │   ├── __init__.py
-│   │   ├── buyer_agent.py        # Buyer CIF negotiation & SCO drafting
-│   │   ├── supplier_agent.py     # Supplier FOB negotiation & PI request drafting
-│   │   ├── discovery.py          # Counterparty matching & automated outreach
-│   │   └── orchestrator.py       # LangGraph multi-agent coordination graph
-│   ├── static/
-│   │   └── index.html            # Dark-mode dashboard with Tailwind CSS & Glassmorphism
-│   ├── arbitrage_engine.py       # Pure Python deterministic risk & boundary engine
-│   ├── directory.py              # Counterparty data store & discovery helpers
-│   ├── fixtures.py               # Pre-configured trade email templates
-│   ├── main.py                   # FastAPI application & REST endpoints
-│   ├── market_data.py            # Live benchmark indices & container freight matrix
-│   ├── prompts.py                # Structured extraction and negotiation prompt templates
-│   ├── schemas.py                # Strict Pydantic v2 domain models & trade state
-│   └── workflow.py               # Orchestrator entrypoint wrapper
-├── .env.example                  # Environment variable template
-├── .gitignore                    # Git ignore file (excludes secrets and cache)
-├── requirements.txt              # Core project dependencies
-└── test_runner.py                # 75-assertion offline test suite
+│   ├── __init__.py
+│   ├── config.py            # Simple Pydantic BaseSettings loading from .env
+│   ├── models.py            # Clean schemas: Campaign, ParsedEmail, DealState
+│   ├── directory.py         # In-memory dictionary of 3 Middle East buyers and 3 Asian suppliers
+│   ├── market.py            # Benchmark index lookup and simple port-to-port freight estimator
+│   ├── math_engine.py       # Deterministic calculations: Net Margin = (Buyer CIF - Landed Cost) / Landed Cost
+│   ├── prompts.py           # Clean Gemini prompts: parser prompt, buyer counter prompt, supplier RFQ prompt
+│   ├── workflow.py          # Complete LangGraph StateGraph (State, Nodes, Routing Edges)
+│   ├── fixtures.py          # Sample realistic trade emails for easy testing
+│   └── main.py              # FastAPI app with 3 endpoints: create campaign, simulate turn, view status
+├── static/
+│   └── index.html           # Simple UI to launch campaigns and step through negotiation rounds
+├── test_runner.py           # Self-contained unit test script verifying the math and graph logic
+├── requirements.txt
+└── .env.example
 ```
 
 ---
 
-## 🛠️ Quick Start
+## 🚀 Quickstart
 
-### 1. Clone & Setup Environment
-
+### 1. Installation
 ```bash
-git clone https://github.com/musabtahirhub/rice-arbitrage-agent.git
-cd rice-arbitrage-agent
-
 # Create virtual environment
 python -m venv venv
-
-# Activate virtual environment
-# Windows:
-venv\Scripts\activate
-# Linux/macOS:
-source venv/bin/activate
+venv\Scripts\activate   # Windows
+source venv/bin/activate # macOS/Linux
 
 # Install dependencies
 pip install -r requirements.txt
 ```
 
-### 2. Configure Environment (Optional)
-
-Copy the environment template:
-
+### 2. Environment Setup
+Copy `.env.example` to `.env`:
 ```bash
-cp .env.example .env
+copy .env.example .env
 ```
+*(Optional: Set `GEMINI_API_KEY` for live LLM extraction. If left blank, the system automatically uses reliable regex pattern matching.)*
 
-If you wish to use live Google Gemini Flash extraction, populate `GEMINI_API_KEY` in `.env`. The core system and test runner are designed to operate fully offline using deterministic engines and regex parsers.
-
-### 3. Run the Test Suite
-
-Run the 75-assertion comprehensive test suite:
-
+### 3. Run Automated Tests
 ```bash
 python test_runner.py
 ```
+Expected output:
+```text
+====================================================================
+  Commodity Arbitrage Multi-Agent System — Self-Contained Test Suite
+====================================================================
 
-**Verification Highlights:**
-- **Part 1**: Deterministic arbitrage engine & Incoterm normalization (15 tests)
-- **Part 2**: MarketDataService dynamic bound computation (11 tests)
-- **Part 3**: Multi-turn negotiation simulation & zero-risk rule (20 tests)
-- **Part 4**: Marketplace directory querying, campaign ignition, and response loop (29 tests)
+--- 1. Testing Market & Directory Services ---
+  [PASS] Found matching Basmati buyers
+  [PASS] Gulf Food Trading found in directory
+  [PASS] Found matching Basmati suppliers
+  [PASS] Indus Rice Mills found in directory
+  [PASS] Basmati benchmark is $900/MT (got 900.0)
+  [PASS] Thai White benchmark is $520/MT (got 520.0)
+  [PASS] Karachi -> Jebel Ali freight is $45/MT (got 45.0)
 
-### 4. Launch the Web Application
+--- 2. Testing Deterministic Math Engine ---
+  [PASS] Landed cost is $965.00/MT (got 965.0)
+  [PASS] Net margin is 19.17% (got 19.17)
+  [PASS] FOB ceiling is $945.00 (got 945.0)
+  [PASS] CIF floor is $1111.00 (got 1111.0)
 
-Start the FastAPI application with Uvicorn:
+--- 3. Testing Risk Evaluation & Invariant Gates ---
+  [PASS] Zero-Risk Invariant: Deal not viable without supplier
+  [PASS] Reason cites Zero-Risk Invariant
+  [PASS] Supplier above ceiling: Deal rejected
+  [PASS] Reason cites FOB ceiling
+  [PASS] Buyer below floor: Deal rejected
+  [PASS] Reason cites CIF floor
+  [PASS] Quantity mismatch: Deal rejected
+  [PASS] Reason cites quantity mismatch
+  [PASS] Viable deal accepted
+  [PASS] Net margin exceeds target (got 19.17%)
 
-```bash
-uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
+--- 4. Testing LangGraph State Machine Negotiation Loop ---
+  [Step 1] Ingesting low buyer inquiry...
+  [PASS] Buyer terms extracted
+  [PASS] Negotiation round = 1
+  [PASS] Deal not viable yet (supplier allocation missing & price low)
+  [PASS] Deal status is counter_sent
+  [PASS] Counter-offer drafted to buyer
+  [Step 2] Ingesting competitive supplier quote...
+  [PASS] Supplier terms extracted
+  [PASS] Negotiation round = 2
+  [PASS] Deal still not viable because buyer price is still $950
+  [Step 3] Buyer increases bid to USD 1150.00 CIF Jebel Ali...
+  [PASS] Negotiation round = 3
+  [PASS] Deal is now viable!
+  [PASS] Net margin exceeds target (got 19.17%)
+  [PASS] Deal closed formally
+  [PASS] Supplier allocation locked first
+  [PASS] Buyer confirmed second
+
+====================================================================
+  Test Results: 35 passed, 0 failed
+====================================================================
+
+  ALL TESTS PASSED SUCCESSFULLY! ***
 ```
 
-Open your browser and navigate to:
-👉 **`http://127.0.0.1:8000`**
-
----
-
-## 🔌 API Reference
-
-| Method | Endpoint | Description |
-|---|---|---|
-| `GET` | `/` | Single-page interactive testing dashboard |
-| `GET` | `/api/directory` | Returns all registered buyers and suppliers from directory |
-| `POST` | `/api/campaigns` | Initializes campaign & triggers autonomous discovery + outreach |
-| `GET` | `/api/campaigns/{id}` | Retrieves campaign ledger state and thread history |
-| `POST` | `/api/campaigns/{id}/simulate-responses` | Simulates realistic counterparty replies (`viable`, `lowball`, etc.) |
-| `POST` | `/api/simulate-email` | Ingests and processes an email through the risk barrier |
-| `GET` | `/api/fixtures` | Sample email templates for manual testing |
-
----
-
-## 🛡️ License
-
-MIT License. Designed for algorithmic commodity trade desks and physical grain arbitrage.
+### 4. Launch the Web Application
+```bash
+uvicorn app.main:app --port 8000 --reload
+```
+Open [http://localhost:8000](http://localhost:8000) to view the interactive dashboard.
