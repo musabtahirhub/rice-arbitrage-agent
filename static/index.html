@@ -3,234 +3,391 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Commodity Arbitrage Multi-Agent System</title>
+  <title>Commodity Arbitrage Multi-Agent Desk</title>
   <script src="https://cdn.tailwindcss.com"></script>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
   <style>
     body { font-family: 'Inter', sans-serif; }
+    .font-mono { font-family: 'JetBrains Mono', monospace; }
   </style>
 </head>
-<body class="bg-slate-900 text-slate-100 min-h-screen">
+<body class="bg-slate-950 text-slate-100 min-h-screen selection:bg-emerald-500 selection:text-white">
   <!-- Header -->
-  <header class="border-b border-slate-800 bg-slate-950/80 backdrop-blur sticky top-0 z-50">
-    <div class="max-w-7xl mx-auto px-4 sm:px-6 py-4 flex justify-between items-center">
+  <header class="border-b border-slate-800/80 bg-slate-900/90 backdrop-blur sticky top-0 z-50">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 py-3.5 flex justify-between items-center">
       <div class="flex items-center space-x-3">
-        <div class="w-10 h-10 rounded-lg bg-emerald-500/20 border border-emerald-500/30 flex items-center justify-center text-emerald-400 font-bold text-xl">
-          🌾
+        <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-emerald-600 to-teal-400 p-0.5 shadow-lg shadow-emerald-500/20">
+          <div class="w-full h-full bg-slate-950 rounded-[10px] flex items-center justify-center text-emerald-400 font-bold text-xl">
+            🌾
+          </div>
         </div>
         <div>
-          <h1 class="text-xl font-bold tracking-tight text-white">Commodity Arbitrage Desk</h1>
-          <p class="text-xs text-slate-400">Autonomous Physical Grain Arbitrage • LangGraph State Machine</p>
+          <div class="flex items-center space-x-2">
+            <h1 class="text-lg font-bold tracking-tight text-white">Commodity Arbitrage Desk</h1>
+            <span class="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">v2.0 Proactive</span>
+          </div>
+          <p class="text-xs text-slate-400">Proactive Buyer-First Origination • Tactical Margin Maximization (Hard & Soft Hurdles)</p>
         </div>
       </div>
-      <div class="flex items-center space-x-4">
-        <span id="systemStatus" class="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium bg-emerald-950 text-emerald-300 border border-emerald-800">
-          <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse mr-1.5"></span>
-          System Ready
+      <div class="flex items-center space-x-3">
+        <span id="systemStatus" class="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium bg-emerald-950/80 text-emerald-300 border border-emerald-800/60">
+          <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse mr-2"></span>
+          Desk Live
         </span>
-        <a href="/docs" target="_blank" class="text-xs text-slate-400 hover:text-white transition">API Docs ↗</a>
+        <a href="/docs" target="_blank" class="text-xs text-slate-400 hover:text-white px-2.5 py-1 rounded-md bg-slate-800 border border-slate-700 transition">API Docs ↗</a>
       </div>
     </div>
   </header>
 
-  <main class="max-w-7xl mx-auto px-4 sm:px-6 py-8 grid grid-cols-1 lg:grid-cols-12 gap-8">
-    <!-- Left Column: Controls & Simulation -->
-    <div class="lg:col-span-5 space-y-6">
-      <!-- 1. Campaign Launch Card -->
-      <div class="bg-slate-800/60 border border-slate-700/60 rounded-xl p-5 shadow-xl backdrop-blur">
-        <h2 class="text-base font-semibold text-white flex items-center mb-4">
-          <span class="w-6 h-6 rounded-md bg-emerald-500/20 text-emerald-400 flex items-center justify-center text-xs mr-2 font-bold">1</span>
-          Initialize Arbitrage Campaign
-        </h2>
-        <form id="campaignForm" class="space-y-4">
-          <div>
-            <label class="block text-xs font-medium text-slate-300 mb-1">Commodity Variety</label>
-            <select id="commoditySelect" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-emerald-500">
-              <option value="Basmati 1121">Basmati 1121 (Benchmark $900/MT FOB)</option>
-              <option value="Super Kernel Basmati">Super Kernel Basmati (Benchmark $980/MT FOB)</option>
-              <option value="Thai White 5%">Thai White 5% (Benchmark $520/MT FOB)</option>
-              <option value="Jasmine Rice">Jasmine Rice (Benchmark $780/MT FOB)</option>
-              <option value="Vietnam 5%">Vietnam 5% (Benchmark $490/MT FOB)</option>
-            </select>
-          </div>
+  <!-- Main Container -->
+  <main class="max-w-7xl mx-auto px-4 sm:px-6 py-6 space-y-6">
 
-          <div class="grid grid-cols-2 gap-3">
-            <div>
-              <label class="block text-xs font-medium text-slate-300 mb-1">Target Volume (MT)</label>
-              <input type="number" id="volumeInput" value="500" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-emerald-500" />
-            </div>
-            <div>
-              <label class="block text-xs font-medium text-slate-300 mb-1">Target Margin %</label>
-              <input type="number" id="marginInput" value="10.0" step="0.5" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-emerald-500" />
-            </div>
-          </div>
-
-          <div>
-            <label class="block text-xs font-medium text-slate-300 mb-1">Destination Port (Buyer Delivery)</label>
-            <select id="portSelect" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-emerald-500">
-              <option value="Jebel Ali">Jebel Ali (UAE)</option>
-              <option value="Dammam">Dammam (Saudi Arabia)</option>
-            </select>
-          </div>
-
-          <button type="submit" id="createBtn" class="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-medium py-2.5 rounded-lg text-sm transition shadow-lg shadow-emerald-900/20">
-            Launch Campaign & Discover Directory
-          </button>
-        </form>
+    <!-- 4-Step Visual Pipeline Indicator -->
+    <div class="bg-slate-900/70 border border-slate-800 rounded-2xl p-5 shadow-2xl backdrop-blur">
+      <div class="flex items-center justify-between mb-3">
+        <div class="flex items-center space-x-2">
+          <span class="text-xs font-bold uppercase tracking-wider text-emerald-400">Origination & Arbitrage Lifecycle</span>
+          <span class="text-slate-500 text-xs">•</span>
+          <span id="pipelineStatusLabel" class="text-xs text-slate-400 font-medium">Awaiting Campaign Launch</span>
+        </div>
+        <div id="activeActionBadge" class="px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-slate-800 text-slate-400 border border-slate-700">
+          Status: Idle
+        </div>
       </div>
 
-      <!-- 2. Interactive Negotiation Simulator -->
-      <div id="simulationCard" class="bg-slate-800/60 border border-slate-700/60 rounded-xl p-5 shadow-xl backdrop-blur opacity-50 pointer-events-none transition-all">
-        <h2 class="text-base font-semibold text-white flex items-center mb-4">
-          <span class="w-6 h-6 rounded-md bg-blue-500/20 text-blue-400 flex items-center justify-center text-xs mr-2 font-bold">2</span>
-          Simulate Incoming Correspondence
-        </h2>
-
-        <!-- Quick Presets -->
-        <div class="mb-4">
-          <span class="block text-xs font-medium text-slate-400 mb-2">Scenario Presets:</span>
-          <div class="grid grid-cols-2 gap-2">
-            <button type="button" onclick="loadPreset('buyer_low')" class="px-2.5 py-1.5 text-xs bg-slate-900 border border-slate-700 hover:border-slate-500 rounded-md text-left text-slate-300">
-              📉 Low Buyer Bid ($950 CIF)
-            </button>
-            <button type="button" onclick="loadPreset('supplier_high')" class="px-2.5 py-1.5 text-xs bg-slate-900 border border-slate-700 hover:border-slate-500 rounded-md text-left text-slate-300">
-              📈 High Supplier Quote ($960 FOB)
-            </button>
-            <button type="button" onclick="loadPreset('supplier_viable')" class="px-2.5 py-1.5 text-xs bg-slate-900 border border-slate-700 hover:border-slate-500 rounded-md text-left text-slate-300">
-              ✅ Competitive Supplier ($900 FOB)
-            </button>
-            <button type="button" onclick="loadPreset('buyer_viable')" class="px-2.5 py-1.5 text-xs bg-slate-900 border border-slate-700 hover:border-slate-500 rounded-md text-left text-slate-300">
-              ✅ Strong Buyer Bid ($1150 CIF)
-            </button>
+      <div class="grid grid-cols-1 md:grid-cols-4 gap-3 relative">
+        <!-- Step 1 -->
+        <div id="pipeStep1" class="p-3.5 rounded-xl border border-slate-800 bg-slate-950/60 transition-all duration-300 relative">
+          <div class="flex items-center space-x-2.5 mb-1.5">
+            <div id="pipeStep1Icon" class="w-6 h-6 rounded-full bg-slate-800 text-slate-400 text-xs font-bold flex items-center justify-center">1</div>
+            <span class="text-xs font-semibold text-slate-200">Buyer Discovered & Pitched</span>
           </div>
+          <p class="text-[11px] text-slate-400">Proactive directory scan & Cold SCO high-anchor pitch sent.</p>
         </div>
 
-        <form id="negotiateForm" class="space-y-4">
-          <div>
-            <label class="block text-xs font-medium text-slate-300 mb-1">Sender Role</label>
-            <div class="flex space-x-4">
-              <label class="inline-flex items-center text-xs text-slate-300">
-                <input type="radio" name="senderRole" value="buyer" checked class="text-emerald-500 focus:ring-0 bg-slate-900 border-slate-700 mr-2" />
-                Buyer (Middle East)
-              </label>
-              <label class="inline-flex items-center text-xs text-slate-300">
-                <input type="radio" name="senderRole" value="supplier" class="text-emerald-500 focus:ring-0 bg-slate-900 border-slate-700 mr-2" />
-                Supplier (Asia Mill)
-              </label>
-            </div>
+        <!-- Step 2 -->
+        <div id="pipeStep2" class="p-3.5 rounded-xl border border-slate-800 bg-slate-950/60 transition-all duration-300 relative opacity-60">
+          <div class="flex items-center space-x-2.5 mb-1.5">
+            <div id="pipeStep2Icon" class="w-6 h-6 rounded-full bg-slate-800 text-slate-400 text-xs font-bold flex items-center justify-center">2</div>
+            <span class="text-xs font-semibold text-slate-200">Buyer Terms Locked</span>
           </div>
+          <p class="text-[11px] text-slate-400">Buyer CIF target received & commercial terms locked in state.</p>
+        </div>
 
-          <div>
-            <label class="block text-xs font-medium text-slate-300 mb-1">Raw Inbound Email</label>
-            <textarea id="emailInput" rows="5" class="w-full bg-slate-900 border border-slate-700 rounded-lg p-3 text-xs font-mono text-slate-200 focus:outline-none focus:border-blue-500"></textarea>
+        <!-- Step 3 -->
+        <div id="pipeStep3" class="p-3.5 rounded-xl border border-slate-800 bg-slate-950/60 transition-all duration-300 relative opacity-60">
+          <div class="flex items-center space-x-2.5 mb-1.5">
+            <div id="pipeStep3Icon" class="w-6 h-6 rounded-full bg-slate-800 text-slate-400 text-xs font-bold flex items-center justify-center">3</div>
+            <span class="text-xs font-semibold text-slate-200">Supplier RFQ Dispatched</span>
           </div>
+          <p class="text-[11px] text-slate-400">Target FOB acquisition ceiling computed; mill RFQ dispatched.</p>
+        </div>
 
-          <button type="submit" id="negotiateBtn" class="w-full bg-blue-600 hover:bg-blue-500 text-white font-medium py-2.5 rounded-lg text-sm transition shadow-lg shadow-blue-900/20">
-            Process Email through LangGraph
-          </button>
-        </form>
+        <!-- Step 4 -->
+        <div id="pipeStep4" class="p-3.5 rounded-xl border border-slate-800 bg-slate-950/60 transition-all duration-300 relative opacity-60">
+          <div class="flex items-center space-x-2.5 mb-1.5">
+            <div id="pipeStep4Icon" class="w-6 h-6 rounded-full bg-slate-800 text-slate-400 text-xs font-bold flex items-center justify-center">4</div>
+            <span class="text-xs font-semibold text-slate-200">Margin Optimized & Closed</span>
+          </div>
+          <p class="text-[11px] text-slate-400">Tactical bargaining closes spread ≥ soft hurdle or hard floor.</p>
+        </div>
       </div>
     </div>
 
-    <!-- Right Column: Live Desk Metrics & Transcripts -->
-    <div class="lg:col-span-7 space-y-6">
-      <!-- 3. Dynamic Market & Risk Metrics -->
-      <div class="bg-slate-800/60 border border-slate-700/60 rounded-xl p-5 shadow-xl backdrop-blur">
-        <div class="flex justify-between items-center mb-4">
-          <h2 class="text-base font-semibold text-white">Live Deal Room & Boundaries</h2>
-          <span id="dealBadge" class="px-2.5 py-0.5 rounded text-xs font-semibold bg-slate-700 text-slate-300">
-            Awaiting Campaign
-          </span>
+    <!-- Main Workspace Grid -->
+    <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+
+      <!-- Left Column: Setup & Simulation Controls -->
+      <div class="lg:col-span-5 space-y-6">
+
+        <!-- 1. Campaign Launch Card -->
+        <div class="bg-slate-900/70 border border-slate-800 rounded-2xl p-5 shadow-xl backdrop-blur">
+          <h2 class="text-sm font-semibold text-white flex items-center mb-4">
+            <span class="w-6 h-6 rounded-lg bg-emerald-500/20 text-emerald-400 flex items-center justify-center text-xs mr-2.5 font-bold border border-emerald-500/30">1</span>
+            Launch Proactive Arbitrage Campaign
+          </h2>
+
+          <form id="campaignForm" onsubmit="event.preventDefault(); launchCampaign(true);" class="space-y-3.5">
+            <div>
+              <label class="block text-xs font-medium text-slate-300 mb-1">Commodity Variety</label>
+              <select id="commoditySelect" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-emerald-500 transition">
+                <option value="Basmati 1121">Basmati 1121 (Benchmark $900/MT FOB)</option>
+                <option value="Super Kernel Basmati">Super Kernel Basmati (Benchmark $980/MT FOB)</option>
+                <option value="Thai White 5%">Thai White 5% (Benchmark $496/MT FOB)</option>
+                <option value="Jasmine Rice">Jasmine Rice (Benchmark $780/MT FOB)</option>
+                <option value="Vietnam 5%">Vietnam 5% (Benchmark $490/MT FOB)</option>
+              </select>
+            </div>
+
+            <div class="grid grid-cols-2 gap-3">
+              <div>
+                <label class="block text-xs font-medium text-slate-300 mb-1">Target Volume (MT)</label>
+                <input type="number" id="volumeInput" value="500" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-emerald-500 transition" />
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-slate-300 mb-1">Destination Port (Buyer)</label>
+                <select id="portSelect" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-emerald-500 transition">
+                  <option value="Jebel Ali">Jebel Ali (UAE)</option>
+                  <option value="Dammam">Dammam (Saudi Arabia)</option>
+                </select>
+              </div>
+            </div>
+
+            <!-- Tiered Profit Hurdles -->
+            <div class="p-3 bg-slate-950/80 rounded-xl border border-slate-800 space-y-2.5">
+              <span class="text-[11px] font-bold text-emerald-400 uppercase tracking-wider block">Tactical Spread Hurdles</span>
+              <div class="grid grid-cols-3 gap-2">
+                <div>
+                  <label class="block text-[10px] text-slate-400 mb-0.5">Hard Floor ($/MT)</label>
+                  <input type="number" id="hardFloorInput" value="50.0" step="5" class="w-full bg-slate-900 border border-rose-900/50 text-rose-300 rounded-lg px-2 py-1 text-xs font-bold focus:outline-none focus:border-rose-500" />
+                  <span class="text-[9px] text-slate-500">Non-negotiable</span>
+                </div>
+                <div>
+                  <label class="block text-[10px] text-slate-400 mb-0.5">Soft Target ($/MT)</label>
+                  <input type="number" id="softTargetInput" value="120.0" step="5" class="w-full bg-slate-900 border border-emerald-900/50 text-emerald-300 rounded-lg px-2 py-1 text-xs font-bold focus:outline-none focus:border-emerald-500" />
+                  <span class="text-[9px] text-slate-500">Ideal profit</span>
+                </div>
+                <div>
+                  <label class="block text-[10px] text-slate-400 mb-0.5">Max Rounds</label>
+                  <input type="number" id="maxRoundsInput" value="3" min="1" max="5" class="w-full bg-slate-900 border border-slate-700 text-slate-200 rounded-lg px-2 py-1 text-xs font-bold focus:outline-none focus:border-slate-500" />
+                  <span class="text-[9px] text-slate-500">Negotiation cap</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="grid grid-cols-1 gap-2 pt-1">
+              <button type="button" onclick="launchCampaign(true)" id="autoRunBtn" class="w-full bg-gradient-to-r from-amber-500 via-orange-500 to-rose-500 hover:from-amber-400 hover:to-rose-400 text-white font-bold py-2.5 rounded-xl text-xs transition shadow-lg shadow-orange-950/40 flex items-center justify-center space-x-2">
+                <span>⚡ Auto-Run End-to-End (Instant Closed Deal)</span>
+              </button>
+              <button type="button" onclick="launchCampaign(false)" id="createBtn" class="w-full bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-semibold py-2 rounded-xl text-xs transition shadow-md shadow-emerald-900/30 flex items-center justify-center space-x-2">
+                <span>🎯 Launch Step-by-Step Interactive Mode</span>
+              </button>
+            </div>
+          </form>
         </div>
 
-        <div class="grid grid-cols-3 gap-4 mb-4">
-          <div class="bg-slate-900/80 border border-slate-700/50 p-3 rounded-lg text-center">
-            <span class="block text-[11px] font-medium text-slate-400">Supplier FOB Ceiling</span>
-            <span id="fobCeiling" class="text-lg font-bold text-amber-400 mt-1 block">$0.00/MT</span>
-            <span class="text-[10px] text-slate-500">Max we will pay mill</span>
+        <!-- 2. Interactive Step-by-Step Simulation -->
+        <div id="simulationCard" class="bg-slate-900/70 border border-slate-800 rounded-2xl p-5 shadow-xl backdrop-blur opacity-40 pointer-events-none transition-all duration-300 space-y-4">
+          <div class="flex items-center justify-between">
+            <h2 class="text-sm font-semibold text-white flex items-center">
+              <span class="w-6 h-6 rounded-lg bg-blue-500/20 text-blue-400 flex items-center justify-center text-xs mr-2.5 font-bold border border-blue-500/30">2</span>
+              Tactical Margin Simulation
+            </h2>
+            <span id="turnCounterBadge" class="text-[10px] px-2 py-0.5 rounded-md bg-slate-800 text-slate-300 border border-slate-700">Turn 0</span>
           </div>
 
-          <div class="bg-slate-900/80 border border-slate-700/50 p-3 rounded-lg text-center">
-            <span class="block text-[11px] font-medium text-slate-400">Buyer CIF Floor</span>
-            <span id="cifFloor" class="text-lg font-bold text-blue-400 mt-1 block">$0.00/MT</span>
-            <span class="text-[10px] text-slate-500">Min viable selling price</span>
+          <!-- Master Auto-Simulate Button -->
+          <div class="p-3 bg-gradient-to-br from-blue-950/40 via-slate-900 to-emerald-950/30 rounded-xl border border-blue-800/40 space-y-2">
+            <div class="flex items-center justify-between">
+              <span class="text-xs font-bold text-white flex items-center">
+                <span class="text-blue-400 mr-1.5">⚡</span> Automated Tactical Stepper
+              </span>
+              <span id="stepHint" class="text-[10px] text-slate-400">Step 1: Buyer Target</span>
+            </div>
+            <button type="button" id="nextTurnBtn" onclick="simulateNextTurn()" class="w-full bg-blue-600 hover:bg-blue-500 text-white font-semibold py-2.5 rounded-xl text-xs transition shadow-md shadow-blue-900/30 flex items-center justify-center space-x-2">
+              <span id="nextTurnBtnText">Simulate Next Negotiation Turn ➔</span>
+            </button>
+            <p class="text-[10px] text-slate-400 text-center">Simulates counter-offers and watches the spread climb toward soft target ($120/MT).</p>
           </div>
 
-          <div class="bg-slate-900/80 border border-slate-700/50 p-3 rounded-lg text-center">
-            <span class="block text-[11px] font-medium text-slate-400">Net Profit Margin</span>
-            <span id="netMargin" class="text-lg font-bold text-slate-400 mt-1 block">0.00%</span>
-            <span id="marginStatus" class="text-[10px] text-slate-500">Target: 10.0%</span>
-          </div>
-        </div>
-
-        <!-- Invariant Notice -->
-        <div id="invariantBanner" class="p-3 bg-amber-950/40 border border-amber-800/50 rounded-lg text-xs text-amber-300 flex items-start space-x-2">
-          <span class="text-sm">🛡️</span>
+          <!-- Scenario Presets -->
           <div>
-            <strong class="font-semibold">Zero-Risk Invariant Enforced:</strong>
-            <p id="invariantText" class="mt-0.5 text-amber-200/80 text-[11px]">
-              The intermediary desk will never lock an agreement with a buyer until matching supplier volume allocation is confirmed.
-            </p>
-          </div>
-        </div>
-      </div>
-
-      <!-- 4. Discovered Counterparties -->
-      <div id="counterpartiesCard" class="bg-slate-800/60 border border-slate-700/60 rounded-xl p-5 shadow-xl backdrop-blur hidden">
-        <h3 class="text-sm font-semibold text-white mb-3">Discovered Counterparties from Directory</h3>
-        <div class="grid grid-cols-2 gap-4">
-          <div>
-            <span class="text-xs font-semibold text-emerald-400 uppercase tracking-wider block mb-2">Target Buyers</span>
-            <div id="buyersList" class="space-y-2 text-xs"></div>
-          </div>
-          <div>
-            <span class="text-xs font-semibold text-blue-400 uppercase tracking-wider block mb-2">Target Mills / Suppliers</span>
-            <div id="suppliersList" class="space-y-2 text-xs"></div>
-          </div>
-        </div>
-      </div>
-
-      <!-- 5. Generated Outbound Drafts & Transcripts -->
-      <div class="bg-slate-800/60 border border-slate-700/60 rounded-xl p-5 shadow-xl backdrop-blur">
-        <h3 class="text-sm font-semibold text-white mb-3">Automated Outbound Agent Correspondence</h3>
-        <div class="space-y-4">
-          <div>
-            <span class="block text-xs font-medium text-slate-400 mb-1">Outbound Response to Buyer:</span>
-            <div id="buyerDraft" class="bg-slate-900 border border-slate-700 rounded-lg p-3 text-xs font-mono text-slate-300 whitespace-pre-wrap min-h-[90px]">
-              No outgoing buyer draft generated yet.
+            <span class="block text-[11px] font-medium text-slate-400 mb-2">Manual Test Scenarios:</span>
+            <div class="grid grid-cols-2 gap-2">
+              <button type="button" onclick="loadPreset('buyer_low')" class="p-2 text-left bg-slate-950 hover:bg-slate-900 border border-slate-800 hover:border-slate-700 rounded-lg text-slate-300 transition">
+                <div class="text-xs font-medium text-rose-400">🔻 Hard Floor Breach</div>
+                <div class="text-[10px] text-slate-500">Buyer $995 CIF ($30 profit)</div>
+              </button>
+              <button type="button" onclick="loadPreset('buyer_concession_r1')" class="p-2 text-left bg-slate-950 hover:bg-slate-900 border border-slate-800 hover:border-slate-700 rounded-lg text-slate-300 transition">
+                <div class="text-xs font-medium text-amber-400">🔄 Round 1 Counter</div>
+                <div class="text-[10px] text-slate-500">Buyer $1045 CIF ($80 profit)</div>
+              </button>
+              <button type="button" onclick="loadPreset('supplier_quote')" class="p-2 text-left bg-slate-950 hover:bg-slate-900 border border-slate-800 hover:border-slate-700 rounded-lg text-slate-300 transition">
+                <div class="text-xs font-medium text-blue-400">🏭 Asian Mill Quote</div>
+                <div class="text-[10px] text-slate-500">Supplier $900 FOB Karachi</div>
+              </button>
+              <button type="button" onclick="loadPreset('buyer_viable')" class="p-2 text-left bg-slate-950 hover:bg-slate-900 border border-slate-800 hover:border-slate-700 rounded-lg text-slate-300 transition">
+                <div class="text-xs font-medium text-emerald-400">🎯 Soft Target Clear</div>
+                <div class="text-[10px] text-slate-500">Buyer $1150 CIF ($185 profit)</div>
+              </button>
             </div>
           </div>
 
-          <div>
-            <span class="block text-xs font-medium text-slate-400 mb-1">Outbound Response to Supplier:</span>
-            <div id="supplierDraft" class="bg-slate-900 border border-slate-700 rounded-lg p-3 text-xs font-mono text-slate-300 whitespace-pre-wrap min-h-[90px]">
-              No outgoing supplier draft generated yet.
+          <!-- Manual Email Submission Form -->
+          <form id="negotiateForm" class="space-y-3 pt-2 border-t border-slate-800/80">
+            <div class="flex items-center justify-between">
+              <label class="text-[11px] font-medium text-slate-300">Direct Email Feed</label>
+              <div class="flex space-x-3 text-xs">
+                <label class="inline-flex items-center text-slate-300 cursor-pointer">
+                  <input type="radio" name="senderRole" value="buyer" checked class="text-emerald-500 focus:ring-0 bg-slate-950 border-slate-700 mr-1.5" />
+                  Buyer
+                </label>
+                <label class="inline-flex items-center text-slate-300 cursor-pointer">
+                  <input type="radio" name="senderRole" value="supplier" class="text-emerald-500 focus:ring-0 bg-slate-950 border-slate-700 mr-1.5" />
+                  Supplier
+                </label>
+              </div>
+            </div>
+
+            <textarea id="emailInput" rows="3" class="w-full bg-slate-950 border border-slate-700 rounded-xl p-2.5 text-[11px] font-mono text-slate-200 focus:outline-none focus:border-blue-500 transition placeholder-slate-600" placeholder="Paste incoming trade email correspondence..."></textarea>
+
+            <button type="submit" id="negotiateBtn" class="w-full bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium py-2 rounded-xl text-xs transition border border-slate-700">
+              Run LangGraph Evaluation
+            </button>
+          </form>
+        </div>
+
+      </div>
+
+      <!-- Right Column: Live Desk Metrics, Tactical Room & Transcripts -->
+      <div class="lg:col-span-7 space-y-6">
+
+        <!-- 3. Dynamic Market & Risk Metrics -->
+        <div class="bg-slate-900/70 border border-slate-800 rounded-2xl p-5 shadow-xl backdrop-blur space-y-4">
+          <div class="flex justify-between items-center">
+            <div>
+              <h2 class="text-sm font-semibold text-white">Live Arbitrage Deal Room</h2>
+              <p class="text-[11px] text-slate-400">Grounding live benchmark prices & dynamic arbitrage boundaries</p>
+            </div>
+            <span id="dealBadge" class="px-2.5 py-1 rounded-lg text-xs font-semibold bg-slate-800 text-slate-400 border border-slate-700">
+              Awaiting Campaign
+            </span>
+          </div>
+
+          <!-- Key Metrics Matrix -->
+          <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            <div class="bg-slate-950/80 border border-slate-800 p-3 rounded-xl text-center">
+              <span class="block text-[10px] uppercase font-bold text-slate-400">Supplier FOB Ceiling</span>
+              <span id="fobCeiling" class="text-base font-bold text-amber-400 mt-0.5 block">$0.00/MT</span>
+              <span class="text-[9px] text-slate-500">Max acquisition</span>
+            </div>
+
+            <div class="bg-slate-950/80 border border-slate-800 p-3 rounded-xl text-center">
+              <span class="block text-[10px] uppercase font-bold text-slate-400">Buyer CIF Floor</span>
+              <span id="cifFloor" class="text-base font-bold text-blue-400 mt-0.5 block">$0.00/MT</span>
+              <span class="text-[9px] text-slate-500">Min viable quote</span>
+            </div>
+
+            <div class="bg-slate-950/80 border border-slate-800 p-3 rounded-xl text-center">
+              <span class="block text-[10px] uppercase font-bold text-slate-400">Net Profit Spread</span>
+              <span id="netSpread" class="text-base font-bold text-emerald-400 mt-0.5 block">$0.00/MT</span>
+              <span id="spreadTargetLabel" class="text-[9px] text-slate-500">Soft: $120 / Hard: $50</span>
+            </div>
+
+            <div class="bg-slate-950/80 border border-slate-800 p-3 rounded-xl text-center">
+              <span class="block text-[10px] uppercase font-bold text-slate-400">Strategic Directive</span>
+              <span id="strategicAction" class="text-xs font-extrabold text-slate-300 mt-1 block tracking-tight">PENDING</span>
+              <span id="actionSubtext" class="text-[9px] text-slate-500">Math Gate</span>
+            </div>
+          </div>
+
+          <!-- Profit Spread Climb Progress Bar -->
+          <div class="p-3 bg-slate-950/80 rounded-xl border border-slate-800 space-y-1.5">
+            <div class="flex justify-between items-center text-xs">
+              <span class="font-medium text-slate-300 flex items-center">
+                📊 Profit Spread Progression
+              </span>
+              <span id="progressText" class="font-mono text-emerald-400 font-bold">$0.00 / $120.00 MT</span>
+            </div>
+            <div class="w-full bg-slate-800 rounded-full h-2.5 overflow-hidden relative">
+              <div id="progressBar" class="bg-gradient-to-r from-amber-500 via-teal-400 to-emerald-400 h-2.5 rounded-full transition-all duration-500" style="width: 0%"></div>
+            </div>
+            <div class="flex justify-between text-[10px] text-slate-500 px-0.5">
+              <span>$0/MT</span>
+              <span class="text-rose-400 font-medium">Hard Floor: $50/MT</span>
+              <span class="text-emerald-400 font-medium">Soft Target: $120/MT</span>
+            </div>
+          </div>
+
+          <!-- Evaluation Desk Note -->
+          <div id="invariantBanner" class="p-3 bg-amber-950/30 border border-amber-800/40 rounded-xl text-xs text-amber-300 flex items-start space-x-2.5">
+            <span class="text-sm">🛡️</span>
+            <div>
+              <strong class="font-semibold text-amber-200">Zero-Risk Invariant & Desk Status:</strong>
+              <p id="invariantText" class="mt-0.5 text-amber-200/80 text-[11px]">
+                Intermediary back-to-back trading desk active. Outbound Soft Corporate Offer (SCO) dispatched to Middle East buyer.
+              </p>
             </div>
           </div>
         </div>
+
+        <!-- 4. Discovered Counterparties Card -->
+        <div id="counterpartiesCard" class="bg-slate-900/70 border border-slate-800 rounded-2xl p-5 shadow-xl backdrop-blur hidden">
+          <div class="flex justify-between items-center mb-3">
+            <h3 class="text-xs font-bold uppercase tracking-wider text-slate-300">Target Counterparty Directory</h3>
+            <span class="text-[10px] text-slate-500">Auto-Queried from Directory Database</span>
+          </div>
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <span class="text-xs font-semibold text-emerald-400 block mb-1.5">Middle East Target Buyers</span>
+              <div id="buyersList" class="space-y-1.5 text-xs"></div>
+            </div>
+            <div>
+              <span class="text-xs font-semibold text-blue-400 block mb-1.5">Asian Export Mills</span>
+              <div id="suppliersList" class="space-y-1.5 text-xs"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 5. Dual Automated Outbound Correspondence Transcripts -->
+        <div class="bg-slate-900/70 border border-slate-800 rounded-2xl p-5 shadow-xl backdrop-blur space-y-4">
+          <div class="flex justify-between items-center">
+            <h3 class="text-sm font-semibold text-white">Automated Autonomous Desk Correspondence</h3>
+            <span class="text-[10px] px-2 py-0.5 rounded bg-slate-800 text-slate-400 font-mono">Outbound Drafts</span>
+          </div>
+
+          <div class="grid grid-cols-1 gap-4">
+            <!-- Buyer Outbound Draft -->
+            <div>
+              <div class="flex justify-between items-center mb-1">
+                <span class="text-xs font-medium text-emerald-400">Outbound to Buyer (Middle East):</span>
+                <span id="buyerDraftType" class="text-[10px] text-slate-400 font-mono">Cold SCO</span>
+              </div>
+              <div id="buyerDraft" class="bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs font-mono text-slate-300 whitespace-pre-wrap min-h-[95px] max-h-[160px] overflow-y-auto">
+                Awaiting campaign ignition to draft proactive Cold SCO...
+              </div>
+            </div>
+
+            <!-- Supplier Outbound Draft -->
+            <div>
+              <div class="flex justify-between items-center mb-1">
+                <span class="text-xs font-medium text-blue-400">Outbound to Supplier (Asian Mill):</span>
+                <span id="supplierDraftType" class="text-[10px] text-slate-400 font-mono">Urgent RFQ</span>
+              </div>
+              <div id="supplierDraft" class="bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs font-mono text-slate-300 whitespace-pre-wrap min-h-[95px] max-h-[160px] overflow-y-auto">
+                Will auto-draft RFQ with calculated FOB ceiling once buyer signals target CIF...
+              </div>
+            </div>
+          </div>
+        </div>
+
       </div>
     </div>
   </main>
 
   <script>
     let currentCampaignId = null;
+    let simStage = 0; // 0: uninitialized, 1: SCO sent, 2: Buyer Bid, 3: Supplier Quote, 4: Closed
+    let hardFloor = 50.0;
+    let softTarget = 120.0;
+    let maxRounds = 3;
 
     const PRESETS = {
       buyer_low: {
         role: "buyer",
-        email: "Subject: RFQ - Basmati 1121 Sella Rice\\n\\nDear Trading Desk,\\n\\nWe are interested in purchasing 500 MT Basmati 1121. Our firm bid is USD 950.00 per MT CIF Jebel Ali, payment by 100% Letter of Credit.\\n\\nRegards,\\nProcurement Manager\\nGulf Food Trading LLC"
+        email: "Subject: Firm Offer - Basmati 1121\\n\\nDear Desk,\\n\\nWe review your SCO and can only offer USD 995.00/MT CIF Jebel Ali for 500 MT. This yields less than minimum floor.\\n\\nRegards,\\nProcurement Manager\\nGulf Food Trading LLC"
       },
-      supplier_high: {
-        role: "supplier",
-        email: "Subject: Offer - Basmati 1121\\n\\nDear Buyer,\\n\\nWe offer 500 MT of Basmati 1121 Sella Rice at USD 960.00/MT FOB Karachi. Shipment in 30 days. Payment 100% LC at sight.\\n\\nRegards,\\nExport Manager\\nIndus Rice Mills"
+      buyer_concession_r1: {
+        role: "buyer",
+        email: "Subject: Revised Target CIF - Basmati 1121\\n\\nDear Desk,\\n\\nWe are interested in the 500 MT Basmati parcel. Our target CIF price is USD 1045.00/MT CIF Jebel Ali. Payment 100% LC at sight.\\n\\nWarm regards,\\nProcurement Manager\\nGulf Food Trading LLC"
       },
-      supplier_viable: {
+      supplier_quote: {
         role: "supplier",
-        email: "Subject: Special Offer - Basmati 1121\\n\\nDear Desk,\\n\\nWe can offer 500 MT Basmati 1121 at a discounted level of USD 900.00/MT FOB Karachi port. Allocation valid for 5 days against LC.\\n\\nBest regards,\\nIndus Rice Mills"
+        email: "Subject: Quotation - Basmati 1121 Sella\\n\\nDear Desk,\\n\\nIn response to your RFQ, we confirm volume allocation of 500 MT Basmati 1121 at USD 900.00/MT FOB Karachi. Ready for prompt shipment against LC.\\n\\nBest regards,\\nIndus Rice Mills"
       },
       buyer_viable: {
         role: "buyer",
-        email: "Subject: Accepted Terms - Basmati 1121\\n\\nDear Desk,\\n\\nWe increase our purchase bid for 500 MT Basmati 1121 to USD 1150.00/MT CIF Jebel Ali. Please confirm allocation.\\n\\nWarm regards,\\nGulf Food Trading LLC"
+        email: "Subject: Accepted Terms - Basmati 1121\\n\\nDear Desk,\\n\\nWe accept your revised terms and agree to increase our purchase bid for 500 MT Basmati 1121 to USD 1150.00/MT CIF Jebel Ali. Please confirm volume lock and send PI.\\n\\nWarm regards,\\nGulf Food Trading LLC"
       }
     };
 
@@ -241,15 +398,68 @@
       document.getElementById("emailInput").value = p.email.replace(/\\n/g, '\n');
     }
 
-    // Launch Campaign
-    document.getElementById("campaignForm").addEventListener("submit", async (e) => {
-      e.preventDefault();
+    function updatePipelineUI(step, action = null) {
+      for (let i = 1; i <= 4; i++) {
+        const el = document.getElementById(`pipeStep${i}`);
+        const icon = document.getElementById(`pipeStep${i}Icon`);
+        if (i < step) {
+          el.className = "p-3.5 rounded-xl border border-emerald-700/60 bg-emerald-950/30 transition-all duration-300 relative";
+          icon.className = "w-6 h-6 rounded-full bg-emerald-500 text-slate-950 text-xs font-bold flex items-center justify-center";
+          icon.innerHTML = "✓";
+        } else if (i === step) {
+          el.className = "p-3.5 rounded-xl border border-blue-500 bg-slate-900 shadow-lg shadow-blue-500/10 transition-all duration-300 relative ring-1 ring-blue-500";
+          icon.className = "w-6 h-6 rounded-full bg-blue-500 text-white text-xs font-bold flex items-center justify-center animate-pulse";
+          icon.innerHTML = i;
+        } else {
+          el.className = "p-3.5 rounded-xl border border-slate-800 bg-slate-950/60 transition-all duration-300 relative opacity-50";
+          icon.className = "w-6 h-6 rounded-full bg-slate-800 text-slate-400 text-xs font-bold flex items-center justify-center";
+          icon.innerHTML = i;
+        }
+      }
+
+      const actionBadge = document.getElementById("activeActionBadge");
+      const stratAction = document.getElementById("strategicAction");
+      if (action === "REJECT_HARD") {
+        actionBadge.textContent = "Action: REJECT_HARD";
+        actionBadge.className = "px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-rose-950 text-rose-300 border border-rose-800";
+        stratAction.textContent = "REJECT_HARD";
+        stratAction.className = "text-xs font-extrabold text-rose-400 mt-1 block tracking-tight";
+      } else if (action === "COUNTER_TO_MAXIMIZE") {
+        actionBadge.textContent = "Action: COUNTER_TO_MAXIMIZE";
+        actionBadge.className = "px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-amber-950 text-amber-300 border border-amber-800";
+        stratAction.textContent = "COUNTER";
+        stratAction.className = "text-xs font-extrabold text-amber-400 mt-1 block tracking-tight";
+      } else if (action === "ACCEPT_AND_CLOSE") {
+        actionBadge.textContent = "Action: ACCEPT_AND_CLOSE";
+        actionBadge.className = "px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-950 text-emerald-300 border border-emerald-800 animate-pulse";
+        stratAction.textContent = "CLOSED 🎉";
+        stratAction.className = "text-xs font-extrabold text-emerald-400 mt-1 block tracking-tight";
+      }
+    }
+
+    function updateSpreadProgress(spread) {
+      document.getElementById("netSpread").textContent = `$${spread.toFixed(2)}/MT`;
+      document.getElementById("progressText").textContent = `$${Math.max(0, spread).toFixed(2)} / $${softTarget.toFixed(2)} MT`;
+      const pct = Math.min(100, Math.max(0, (spread / softTarget) * 100));
+      document.getElementById("progressBar").style.width = `${pct}%`;
+    }
+
+    // Launch Campaign (Proactive Origination & Autonomous Execution)
+    async function launchCampaign(autoRun = false) {
+      hardFloor = parseFloat(document.getElementById("hardFloorInput").value);
+      softTarget = parseFloat(document.getElementById("softTargetInput").value);
+      maxRounds = parseInt(document.getElementById("maxRoundsInput").value);
+
       const payload = {
         commodity: document.getElementById("commoditySelect").value,
         target_volume_mt: parseFloat(document.getElementById("volumeInput").value),
-        target_margin_pct: parseFloat(document.getElementById("marginInput").value),
+        target_margin_pct: 10.0,
         max_variance_from_benchmark_pct: 5.0,
         destination_port: document.getElementById("portSelect").value,
+        min_profit_per_mt_hard: hardFloor,
+        min_profit_per_mt_soft: softTarget,
+        max_negotiation_rounds: maxRounds,
+        auto_run: autoRun,
       };
 
       try {
@@ -261,46 +471,130 @@
         const data = await res.json();
         currentCampaignId = data.campaign_id;
 
-        // Update UI
-        document.getElementById("simulationCard").classList.remove("opacity-50", "pointer-events-none");
-        document.getElementById("fobCeiling").textContent = `$${data.dynamic_fob_ceiling.toFixed(2)}/MT`;
-        document.getElementById("cifFloor").textContent = `$${data.dynamic_cif_floor.toFixed(2)}/MT`;
-        document.getElementById("dealBadge").textContent = `Active: ${data.campaign_id}`;
-        document.getElementById("dealBadge").className = "px-2.5 py-0.5 rounded text-xs font-semibold bg-emerald-950 text-emerald-400 border border-emerald-800";
-
         // Render discovered counterparties
-        const buyersList = document.getElementById("buyersList");
-        buyersList.innerHTML = data.discovered_buyers.map(b => `
-          <div class="bg-slate-900 p-2 rounded border border-slate-800">
-            <span class="font-medium text-white">${b.name}</span>
-            <div class="text-[11px] text-slate-400">${b.primary_port} • Rep: ${b.reputation_score}★</div>
-          </div>
-        `).join("");
+        if (data.discovered_buyers) {
+          const buyersList = document.getElementById("buyersList");
+          buyersList.innerHTML = data.discovered_buyers.map(b => `
+            <div class="bg-slate-950 p-2 rounded-lg border border-slate-800 flex justify-between items-center">
+              <div>
+                <span class="font-medium text-white">${b.name}</span>
+                <div class="text-[10px] text-slate-400">${b.primary_port} • ${b.country}</div>
+              </div>
+              <span class="text-[10px] font-bold text-emerald-400">★ ${b.reputation_score}</span>
+            </div>
+          `).join("");
+        }
 
-        const suppliersList = document.getElementById("suppliersList");
-        suppliersList.innerHTML = data.discovered_suppliers.map(s => `
-          <div class="bg-slate-900 p-2 rounded border border-slate-800">
-            <span class="font-medium text-white">${s.name}</span>
-            <div class="text-[11px] text-slate-400">${s.primary_port} • Rep: ${s.reputation_score}★</div>
-          </div>
-        `).join("");
-
+        if (data.discovered_suppliers) {
+          const suppliersList = document.getElementById("suppliersList");
+          suppliersList.innerHTML = data.discovered_suppliers.map(s => `
+            <div class="bg-slate-950 p-2 rounded-lg border border-slate-800 flex justify-between items-center">
+              <div>
+                <span class="font-medium text-white">${s.name}</span>
+                <div class="text-[10px] text-slate-400">${b = s.primary_port} • ${s.country}</div>
+              </div>
+              <span class="text-[10px] font-bold text-blue-400">★ ${s.reputation_score}</span>
+            </div>
+          `).join("");
+        }
         document.getElementById("counterpartiesCard").classList.remove("hidden");
-        loadPreset("buyer_low");
+
+        if (data.dynamic_fob_ceiling) {
+          document.getElementById("fobCeiling").textContent = `$${data.dynamic_fob_ceiling.toFixed(2)}/MT`;
+        }
+        if (data.dynamic_cif_floor) {
+          document.getElementById("cifFloor").textContent = `$${data.dynamic_cif_floor.toFixed(2)}/MT`;
+        }
+
+        if (autoRun && data.deal_status === "closed") {
+          // Autonomous execution completed end-to-end
+          simStage = 4;
+          document.getElementById("simulationCard").classList.remove("opacity-40", "pointer-events-none");
+          document.getElementById("dealBadge").textContent = `Closed & Locked: ${data.campaign_id} 🎉`;
+          document.getElementById("dealBadge").className = "px-2.5 py-1 rounded-lg text-xs font-semibold bg-emerald-600 text-white animate-pulse";
+          document.getElementById("pipelineStatusLabel").textContent = `Step 4: Deal Closed Autonomously (Rounds: ${data.negotiation_rounds_completed})`;
+          document.getElementById("turnCounterBadge").textContent = `Rounds: ${data.negotiation_rounds_completed} / ${maxRounds}`;
+          document.getElementById("invariantText").textContent = data.evaluation_reason || "Autonomous negotiation concluded with optimal margin allocation.";
+
+          updateSpreadProgress(data.final_net_spread_usd || data.net_spread_usd || 0.0);
+          updatePipelineUI(4, data.action || "ACCEPT_AND_CLOSE");
+
+          if (data.buyer_draft) {
+            document.getElementById("buyerDraft").textContent = data.buyer_draft;
+            document.getElementById("buyerDraftType").textContent = "Deal Confirmation (SCO Acceptance)";
+          }
+          if (data.supplier_draft) {
+            document.getElementById("supplierDraft").textContent = data.supplier_draft;
+            document.getElementById("supplierDraftType").textContent = "Volume Allocation Locked";
+          }
+
+          document.getElementById("nextTurnBtnText").textContent = "Deal Fully Closed & Optimized 🎉";
+          document.getElementById("stepHint").textContent = `Autonomous execution completed (${data.audit_transcript?.length || 0} msgs in audit trail)`;
+        } else {
+          // Step-by-step interactive mode
+          simStage = 1;
+          document.getElementById("simulationCard").classList.remove("opacity-40", "pointer-events-none");
+          document.getElementById("dealBadge").textContent = `Active: ${data.campaign_id}`;
+          document.getElementById("dealBadge").className = "px-2.5 py-1 rounded-lg text-xs font-semibold bg-emerald-950 text-emerald-400 border border-emerald-800";
+          document.getElementById("pipelineStatusLabel").textContent = "Step 1: Proactive Buyer SCO Dispatched";
+
+          if (data.buyer_draft) {
+            document.getElementById("buyerDraft").textContent = data.buyer_draft;
+            document.getElementById("buyerDraftType").textContent = `Cold SCO (Anchor $${data.anchor_cif_usd?.toFixed(2) || '0.00'}/MT)`;
+          }
+
+          updatePipelineUI(1);
+          updateSpreadProgress(0.0);
+
+          document.getElementById("nextTurnBtnText").textContent = "Simulate Turn 1: Buyer Indicates Bid ($1045 CIF) ➔";
+          document.getElementById("stepHint").textContent = "Buyer responds to Cold SCO";
+        }
       } catch (err) {
         alert("Error creating campaign: " + err);
       }
-    });
+    }
 
-    // Run Negotiation Turn
-    document.getElementById("negotiateForm").addEventListener("submit", async (e) => {
-      e.preventDefault();
-      if (!currentCampaignId) return alert("Please launch a campaign first.");
+    // Automated Stepper Function
+    async function simulateNextTurn() {
+      if (!currentCampaignId) return alert("Please launch campaign first.");
 
+      let role = "buyer";
+      let email = "";
+
+      if (simStage === 1) {
+        // Step 1 -> Buyer sends initial bid ($1045 CIF, $80 spread over landed $965)
+        role = "buyer";
+        email = "Subject: Re: SCO Basmati 1121\n\nDear Trading Desk,\n\nWe review your SCO. We are prepared to book 500 MT Basmati 1121 at USD 1045.00/MT CIF Jebel Ali, LC at sight.\n\nRegards,\nProcurement Manager\nGulf Food Trading LLC";
+        document.getElementById("nextTurnBtnText").textContent = "Simulate Turn 2: Asian Mill Quotes ($900 FOB) ➔";
+        document.getElementById("stepHint").textContent = "Supplier responds to RFQ";
+        simStage = 2;
+      } else if (simStage === 2) {
+        // Step 2 -> Supplier quotes $900 FOB
+        role = "supplier";
+        email = "Subject: Quotation - 500 MT Basmati 1121\n\nDear Procurement Desk,\n\nWe quote 500 MT Basmati 1121 at USD 900.00/MT FOB Karachi. LC payment.\n\nBest regards,\nIndus Rice Mills";
+        document.getElementById("nextTurnBtnText").textContent = "Simulate Turn 3: Buyer Concedes to Margin Target ($1085 CIF) ➔";
+        document.getElementById("stepHint").textContent = "Buyer responds to Round 1 Counter";
+        simStage = 3;
+      } else if (simStage === 3) {
+        // Step 3 -> Buyer agrees to optimal close ($1085 CIF, $120 spread)
+        role = "buyer";
+        email = "Subject: Final Price Agreement - Basmati 1121\n\nDear Trading Desk,\n\nTo conclude this business, we agree to adjust our CIF price to USD 1085.00/MT CIF Jebel Ali for 500 MT. Please lock allocation and dispatch contract.\n\nWarm regards,\nGulf Food Trading LLC";
+        document.getElementById("nextTurnBtnText").textContent = "Deal Fully Closed & Optimized 🎉";
+        document.getElementById("stepHint").textContent = "Negotiation complete";
+        simStage = 4;
+      } else {
+        alert("Deal negotiation cycle complete! You can test manual scenarios or launch another campaign.");
+        return;
+      }
+
+      await executeNegotiationTurn(role, email);
+    }
+
+    async function executeNegotiationTurn(role, email) {
       const payload = {
         campaign_id: currentCampaignId,
-        sender_role: document.querySelector('input[name="senderRole"]:checked').value,
-        raw_email: document.getElementById("emailInput").value
+        sender_role: role,
+        raw_email: email
       };
 
       try {
@@ -311,33 +605,51 @@
         });
         const data = await res.json();
 
-        // Update Deal Metrics
-        const marginEl = document.getElementById("netMargin");
-        marginEl.textContent = `${data.net_margin_pct.toFixed(2)}%`;
-        marginEl.className = data.is_deal_viable ? "text-lg font-bold text-emerald-400 mt-1 block" : "text-lg font-bold text-amber-400 mt-1 block";
-
-        const dealBadge = document.getElementById("dealBadge");
-        if (data.is_deal_viable) {
-          dealBadge.textContent = "Deal Viable & Closed! 🎉";
-          dealBadge.className = "px-2.5 py-0.5 rounded text-xs font-semibold bg-emerald-600 text-white animate-pulse";
-        } else {
-          dealBadge.textContent = `Round ${data.negotiation_round}: Counter-Offer Sent`;
-          dealBadge.className = "px-2.5 py-0.5 rounded text-xs font-semibold bg-amber-900/60 text-amber-300 border border-amber-700";
-        }
-
-        // Update Invariant Banner
+        // Update Round & Deal status
+        document.getElementById("turnCounterBadge").textContent = `Round ${data.negotiation_round} / ${maxRounds}`;
         document.getElementById("invariantText").textContent = data.evaluation_reason;
 
-        // Update Drafts
+        // Update Spread & Action
+        updateSpreadProgress(data.net_spread_usd || 0.0);
+        updatePipelineUI(data.pipeline_step || 2, data.action);
+
+        if (data.deal_status === "closed") {
+          document.getElementById("dealBadge").textContent = "Deal Closed & Viable! 🎉";
+          document.getElementById("dealBadge").className = "px-2.5 py-1 rounded-lg text-xs font-semibold bg-emerald-600 text-white animate-pulse";
+          document.getElementById("pipelineStatusLabel").textContent = "Step 4: Margin Optimized & Deal Closed";
+        } else if (data.deal_status === "rejected") {
+          document.getElementById("dealBadge").textContent = "Deal Rejected (Hard Floor)";
+          document.getElementById("dealBadge").className = "px-2.5 py-1 rounded-lg text-xs font-semibold bg-rose-900 text-rose-200 border border-rose-700";
+          document.getElementById("pipelineStatusLabel").textContent = "Deal Terminated (Hard Floor Breach)";
+        } else {
+          document.getElementById("dealBadge").textContent = `Round ${data.negotiation_round}: ${data.action || "Active"}`;
+          document.getElementById("dealBadge").className = "px-2.5 py-1 rounded-lg text-xs font-semibold bg-amber-900/80 text-amber-200 border border-amber-700";
+          document.getElementById("pipelineStatusLabel").textContent = `Step ${data.pipeline_step}: Active Bargaining Round ${data.negotiation_round}`;
+        }
+
+        // Update Correspondence Drafts
         if (data.buyer_draft) {
           document.getElementById("buyerDraft").textContent = data.buyer_draft;
+          document.getElementById("buyerDraftType").textContent = data.deal_status === "closed" ? "Deal Confirmation (SCO Lock)" : "Tactical Counter-Offer";
         }
         if (data.supplier_draft) {
           document.getElementById("supplierDraft").textContent = data.supplier_draft;
+          document.getElementById("supplierDraftType").textContent = data.deal_status === "closed" ? "Allocation Locked" : (data.target_fob_ceiling ? `RFQ (Ceiling $${data.target_fob_ceiling.toFixed(2)}/MT)` : "Tactical Counter-Bid");
         }
+
       } catch (err) {
-        alert("Error executing negotiation: " + err);
+        alert("Error executing negotiation turn: " + err);
       }
+    }
+
+    // Direct Form Submission
+    document.getElementById("negotiateForm").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      if (!currentCampaignId) return alert("Please launch a campaign first.");
+      const role = document.querySelector('input[name="senderRole"]:checked').value;
+      const raw = document.getElementById("emailInput").value;
+      if (!raw.trim()) return alert("Please enter email text.");
+      await executeNegotiationTurn(role, raw);
     });
   </script>
 </body>

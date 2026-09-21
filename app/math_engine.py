@@ -3,14 +3,17 @@ Deterministic mathematical calculations and risk evaluation engine.
 All pricing, margin formulas, and validation gates run in pure Python (never in the LLM).
 """
 from typing import Optional
+from app.config import settings
 from app.models import Campaign, ParsedEmail
 
 
-def calculate_landed_cost(supplier_fob: float, freight: float, buffer_usd: float = 20.0) -> float:
+def calculate_landed_cost(supplier_fob: float, freight: float, buffer_usd: Optional[float] = None) -> float:
     """
     Compute total landed cost at destination port in USD/MT.
     Landed Cost = Supplier FOB + Ocean Freight + Operating/Financing Buffer
     """
+    if buffer_usd is None:
+        buffer_usd = settings.default_buffer_usd_per_mt
     return round(supplier_fob + freight + buffer_usd, 2)
 
 
@@ -27,14 +30,20 @@ def calculate_net_margin(buyer_cif: float, landed_cost: float) -> float:
 def calculate_dynamic_bounds(
     benchmark_fob: float,
     freight: float,
-    max_variance_pct: float = 5.0,
-    target_margin_pct: float = 10.0,
-    buffer_usd: float = 20.0,
+    max_variance_pct: Optional[float] = None,
+    target_margin_pct: Optional[float] = None,
+    buffer_usd: Optional[float] = None,
 ) -> dict[str, float]:
     """
     Calculate dynamic FOB ceiling (for supplier) and CIF floor (for buyer)
     grounded in live benchmark market rates.
     """
+    if max_variance_pct is None:
+        max_variance_pct = settings.default_max_variance_pct
+    if target_margin_pct is None:
+        target_margin_pct = settings.default_target_margin_pct
+    if buffer_usd is None:
+        buffer_usd = settings.default_buffer_usd_per_mt
     # 1. Supplier FOB Ceiling: Benchmark + acceptable variance
     dynamic_fob_ceiling = benchmark_fob * (1.0 + max_variance_pct / 100.0)
 
@@ -67,12 +76,82 @@ def normalize_terms(terms: ParsedEmail, freight: float) -> tuple[float, float]:
         return 0.0, fob_price
 
 
+def evaluate_deal_strategy(
+    buyer_cif: float,
+    supplier_fob: float,
+    freight: float,
+    buffer_usd: float,
+    round_num: int,
+    campaign: Campaign,
+) -> dict:
+    """
+    Evaluate tactical margin maximization strategy with hard and soft hurdles:
+    1. Calculate landed cost: supplier_fob + freight + buffer_usd
+    2. Calculate net spread: buyer_cif - landed_cost
+    3. Hard Limit: net_spread < min_profit_per_mt_hard -> REJECT_HARD, viable=False
+    4. Soft Concession: net_spread < min_profit_per_mt_soft AND round_num < max_rounds -> COUNTER_TO_MAXIMIZE, viable=True
+    5. Optimal / Final Close: net_spread >= min_profit_per_mt_soft OR round_num >= max_rounds -> ACCEPT_AND_CLOSE, viable=True
+    """
+    landed_cost = round(supplier_fob + freight + buffer_usd, 2)
+    net_spread = round(buyer_cif - landed_cost, 2)
+    net_margin_pct = calculate_net_margin(buyer_cif, landed_cost)
+
+    # 3. Hard Limit Check
+    if net_spread < campaign.min_profit_per_mt_hard:
+        return {
+            "action": "REJECT_HARD",
+            "viable": False,
+            "landed_cost": landed_cost,
+            "net_spread": net_spread,
+            "net_margin_pct": net_margin_pct,
+            "reason": (
+                f"Net spread ${net_spread:.2f}/MT is below non-negotiable hard floor of "
+                f"${campaign.min_profit_per_mt_hard:.2f}/MT (Landed: ${landed_cost:.2f}, Buyer CIF: ${buyer_cif:.2f}). Deal rejected."
+            ),
+        }
+
+    # 4. Soft Concession Zone
+    if net_spread < campaign.min_profit_per_mt_soft and round_num < campaign.max_negotiation_rounds:
+        return {
+            "action": "COUNTER_TO_MAXIMIZE",
+            "viable": True,
+            "landed_cost": landed_cost,
+            "net_spread": net_spread,
+            "net_margin_pct": net_margin_pct,
+            "reason": (
+                f"Net spread ${net_spread:.2f}/MT clears hard floor (${campaign.min_profit_per_mt_hard:.2f}/MT) "
+                f"but is below soft target (${campaign.min_profit_per_mt_soft:.2f}/MT) at round {round_num}/{campaign.max_negotiation_rounds}. "
+                f"Countering to maximize margin."
+            ),
+        }
+
+    # 5. Optimal / Final Close
+    is_optimal = net_spread >= campaign.min_profit_per_mt_soft
+    close_desc = (
+        f"clears soft target of ${campaign.min_profit_per_mt_soft:.2f}/MT"
+        if is_optimal
+        else f"accepted at round {round_num}/{campaign.max_negotiation_rounds} above hard floor (${campaign.min_profit_per_mt_hard:.2f}/MT)"
+    )
+    return {
+        "action": "ACCEPT_AND_CLOSE",
+        "viable": True,
+        "landed_cost": landed_cost,
+        "net_spread": net_spread,
+        "net_margin_pct": net_margin_pct,
+        "reason": (
+            f"Deal viable with net spread of ${net_spread:.2f}/MT ({close_desc}). "
+            f"Supplier FOB: ${supplier_fob:.2f}, Landed: ${landed_cost:.2f}, Buyer CIF: ${buyer_cif:.2f}."
+        ),
+    }
+
+
 def evaluate_deal(
     campaign: Campaign,
     buyer_terms: Optional[ParsedEmail],
     supplier_terms: Optional[ParsedEmail],
     benchmark_fob: float,
     freight: float,
+    round_num: int = 0,
 ) -> dict:
     """
     Deterministic gatekeeper evaluating deal viability against dynamic boundaries.
@@ -92,6 +171,8 @@ def evaluate_deal(
     if not supplier_terms:
         return {
             "viable": False,
+            "action": None,
+            "net_spread": 0.0,
             "net_margin_pct": 0.0,
             "landed_cost": 0.0,
             "reason": "Supplier allocation not yet secured. Zero-Risk Invariant prevents commitment to buyer.",
@@ -102,6 +183,8 @@ def evaluate_deal(
     if not buyer_terms:
         return {
             "viable": False,
+            "action": None,
+            "net_spread": 0.0,
             "net_margin_pct": 0.0,
             "landed_cost": 0.0,
             "reason": "Buyer inquiry pending. Awaiting buyer price quote.",
@@ -116,6 +199,8 @@ def evaluate_deal(
     if buyer_terms.quantity_mt != supplier_terms.quantity_mt:
         return {
             "viable": False,
+            "action": "REJECT_HARD",
+            "net_spread": 0.0,
             "net_margin_pct": 0.0,
             "landed_cost": 0.0,
             "reason": f"Quantity mismatch: Buyer requested {buyer_terms.quantity_mt} MT, but supplier offered {supplier_terms.quantity_mt} MT.",
@@ -126,40 +211,43 @@ def evaluate_deal(
     if supplier_fob > fob_ceiling:
         return {
             "viable": False,
+            "action": "REJECT_HARD",
+            "net_spread": 0.0,
             "net_margin_pct": 0.0,
             "landed_cost": 0.0,
             "reason": f"Supplier FOB ${supplier_fob:.2f}/MT exceeds dynamic ceiling of ${fob_ceiling:.2f}/MT (Benchmark: ${benchmark_fob:.2f} + {campaign.max_variance_from_benchmark_pct}%).",
             **bounds,
         }
 
-    # Rule 5: Buyer floor check
-    if buyer_cif < cif_floor:
+    # Rule 5: Buyer floor check (initial static gate check prior to live negotiation)
+    if round_num == 0 and buyer_cif < cif_floor:
         return {
             "viable": False,
+            "action": "REJECT_HARD",
+            "net_spread": 0.0,
             "net_margin_pct": 0.0,
             "landed_cost": 0.0,
             "reason": f"Buyer CIF ${buyer_cif:.2f}/MT is below minimum viable floor of ${cif_floor:.2f}/MT.",
             **bounds,
         }
 
-    # Rule 6: Landed cost & net profit margin check
-    landed_cost = calculate_landed_cost(supplier_fob, freight, campaign.buffer_usd_per_mt)
-    margin_pct = calculate_net_margin(buyer_cif, landed_cost)
+    # Strategy Evaluation (Hard Floor & Soft Hurdle)
+    buffer = campaign.buffer_usd_per_mt if campaign.buffer_usd_per_mt is not None else settings.default_buffer_usd_per_mt
+    strategy = evaluate_deal_strategy(
+        buyer_cif=buyer_cif,
+        supplier_fob=supplier_fob,
+        freight=freight,
+        buffer_usd=buffer,
+        round_num=round_num,
+        campaign=campaign,
+    )
 
-    if margin_pct < campaign.target_margin_pct:
-        return {
-            "viable": False,
-            "net_margin_pct": margin_pct,
-            "landed_cost": landed_cost,
-            "reason": f"Net margin {margin_pct:.2f}% is below target hurdle of {campaign.target_margin_pct:.2f}%. Landed cost: ${landed_cost:.2f}/MT, Buyer CIF: ${buyer_cif:.2f}/MT.",
-            **bounds,
-        }
-
-    # All gates cleared!
     return {
-        "viable": True,
-        "net_margin_pct": margin_pct,
-        "landed_cost": landed_cost,
-        "reason": f"Deal is fully viable with net margin of {margin_pct:.2f}% (Target: {campaign.target_margin_pct:.2f}%). Supplier FOB: ${supplier_fob:.2f}, Landed: ${landed_cost:.2f}, Buyer CIF: ${buyer_cif:.2f}.",
+        "viable": strategy["viable"],
+        "action": strategy["action"],
+        "net_spread": strategy["net_spread"],
+        "net_margin_pct": strategy["net_margin_pct"],
+        "landed_cost": strategy["landed_cost"],
+        "reason": strategy["reason"],
         **bounds,
     }
