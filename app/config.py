@@ -1,7 +1,3 @@
-"""
-Centralized application settings loaded dynamically from environment variables and .env.
-Ensures zero hardcoded runtime configurations in business logic.
-"""
 from typing import Union
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -14,16 +10,10 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # -----------------------------------------------------------------------
-    # LLM & AI Model Settings
-    # -----------------------------------------------------------------------
     gemini_api_key: str = Field(default="", validation_alias=AliasChoices("GEMINI_API_KEY", "GOOGLE_API_KEY"))
     gemini_model: str = Field(default="gemini-2.5-flash", validation_alias=AliasChoices("GEMINI_MODEL", "LLM_MODEL"))
     llm_temperature: float = Field(default=0.2, validation_alias=AliasChoices("LLM_TEMPERATURE", "TEMPERATURE"))
 
-    # -----------------------------------------------------------------------
-    # Live Email Transport Settings (SMTP / IMAP)
-    # -----------------------------------------------------------------------
     smtp_server: str = Field(default="smtp.gmail.com", validation_alias=AliasChoices("SMTP_SERVER", "EMAIL_SMTP_SERVER"))
     smtp_port: int = Field(default=587, validation_alias=AliasChoices("SMTP_PORT", "EMAIL_SMTP_PORT"))
     imap_server: str = Field(default="imap.gmail.com", validation_alias=AliasChoices("IMAP_SERVER", "EMAIL_IMAP_SERVER"))
@@ -31,9 +21,6 @@ class Settings(BaseSettings):
     email_pass: str = Field(default="", validation_alias=AliasChoices("EMAIL_PASS", "GMAIL_PASS", "SMTP_PASS", "EMAIL_PASSWORD"))
     my_test_email: str = Field(default="", validation_alias=AliasChoices("MY_TEST_EMAIL", "TEST_BUYER_EMAIL", "RECIPIENT_EMAIL"))
 
-    # -----------------------------------------------------------------------
-    # Server & Networking
-    # -----------------------------------------------------------------------
     port: int = Field(default=8000, validation_alias=AliasChoices("PORT", "DEFAULT_APP_PORT", "SERVER_PORT"))
     host: str = Field(default="127.0.0.1", validation_alias=AliasChoices("HOST", "SERVER_HOST"))
     cors_origins: Union[list[str], str] = Field(
@@ -41,9 +28,6 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CORS_ORIGINS", "ALLOWED_ORIGINS"),
     )
 
-    # -----------------------------------------------------------------------
-    # Live Market Web Scraper & Cache Configuration
-    # -----------------------------------------------------------------------
     market_source_url: str = Field(
         default="https://query1.finance.yahoo.com/v8/finance/chart/ZR=F?interval=1d&range=5d",
         validation_alias=AliasChoices("MARKET_SOURCE_URL", "YAHOO_RICE_URL", "THAI_RICE_URL"),
@@ -53,7 +37,7 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("MARKET_CACHE_FILE", "CACHE_FILE_PATH"),
     )
     market_cache_ttl_seconds: int = Field(
-        default=21600,  # 6 hours
+        default=21600,
         validation_alias=AliasChoices("MARKET_DATA_CACHE_TTL_SECONDS", "MARKET_CACHE_TTL"),
     )
     market_fetch_timeout_seconds: float = Field(
@@ -73,9 +57,6 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("DEFAULT_FUEL_SURCHARGE_PCT", "FREIGHT_BAF_PCT"),
     )
 
-    # -----------------------------------------------------------------------
-    # Default Campaign Arbitrage Parameters
-    # -----------------------------------------------------------------------
     default_commodity: str = Field(
         default="Basmati 1121",
         validation_alias=AliasChoices("DEFAULT_COMMODITY", "COMMODITY"),
@@ -113,9 +94,6 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("DEFAULT_BROKEN_PERCENTAGE", "BROKEN_PERCENTAGE"),
     )
 
-    # -----------------------------------------------------------------------
-    # Trading Desk Identity & Sign-Off
-    # -----------------------------------------------------------------------
     desk_name: str = Field(
         default="Global Agro Arbitrage Desk",
         validation_alias=AliasChoices("DESK_NAME", "TRADING_DESK_NAME"),
@@ -126,5 +104,4 @@ class Settings(BaseSettings):
     )
 
 
-# Singleton configuration instance
 settings = Settings()

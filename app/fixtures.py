@@ -1,15 +1,3 @@
-"""
-Realistic raw-email fixtures for testing the arbitrage workflow.
-
-These simulate actual negotiation emails a rice trading desk would
-receive.  They are consumed by the LLM extraction node (parse_email)
-and by the deterministic unit tests (test_runner.py).
-"""
-
-# ---------------------------------------------------------------------------
-# Fixture 1 — Viable buyer CIF inquiry (Middle East importer)
-# ---------------------------------------------------------------------------
-
 VIABLE_BUYER_EMAIL = """\
 Subject: Inquiry — Basmati 1121 Sella Rice 5% Broken — CIF Jebel Ali
 
@@ -37,9 +25,6 @@ Al Rashed Trading LLC
 Dubai, UAE
 """
 
-# ---------------------------------------------------------------------------
-# Fixture 2 — Matching supplier FOB quote (Indian exporter)
-# ---------------------------------------------------------------------------
 
 MATCHING_SUPPLIER_EMAIL = """\
 Subject: Re: Quotation — Basmati 1121 Sella Rice 5% Broken — FOB Mundra
@@ -65,9 +50,6 @@ Gupta Agri Exports Pvt. Ltd.
 Karnal, Haryana, India
 """
 
-# ---------------------------------------------------------------------------
-# Fixture 3 — Low-ball buyer inquiry (breaches hard CIF floor)
-# ---------------------------------------------------------------------------
 
 LOWBALL_BUYER_EMAIL = """\
 Subject: Price Inquiry — Basmati 1121 Sella Rice — CIF Karachi

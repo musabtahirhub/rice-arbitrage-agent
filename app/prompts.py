@@ -1,33 +1,44 @@
-"""
-Prompt templates for Gemini LLM.
-LLM usage is scoped to unstructured text extraction and 100% dynamic trade correspondence.
-All arithmetic and boundary logic is calculated beforehand by pure Python and passed as context.
-Every correspondence prompt enforces a standardized output format:
-SUBJECT: <dynamic subject line>
-BODY:
-<dynamic email body>
-"""
-
 EMAIL_PARSER_PROMPT = """\
-You are an expert commodity trade assistant.
-Analyze the following email correspondence and extract commercial trade terms into a JSON object matching this schema:
+You are an expert commodity trading desk assistant.
+Analyze the following incoming trade email semantically to classify counterparty intent and extract commercial trade terms.
 
-{
-  "sender_role": "buyer" or "supplier",
-  "commodity": "<commodity name, e.g. Basmati 1121>",
+Deal Context:
+- Counterparty Role: {role}
+- Desk's Last Proposed Rate: USD {last_proposed_price:.2f}/MT (Use this price if counterparty accepts or confirms without repeating digits)
+- Commodity Default: {commodity}
+- Target Volume Default: {default_volume_mt:,.0f} MT
+
+Output a single valid JSON object matching this exact schema:
+{{
+  "sender_role": "{role}",
+  "intent": "ACCEPTANCE" | "COUNTER_OFFER" | "REJECTION" | "INQUIRY",
+  "is_acceptance": true or false,
+  "commodity": "<commodity name>",
   "quantity_mt": <number in metric tons>,
   "price_usd_per_mt": <numeric unit price in USD per MT>,
-  "incoterm": "FOB" or "CIF",
-  "port": "<port name, e.g. Jebel Ali, Mundra, Karachi>",
-  "payment_terms": "<e.g. 100% LC at sight, CAD>"
-}
+  "incoterm": "CIF" or "FOB",
+  "port": "<port name>",
+  "payment_terms": "<e.g. 100% LC at sight, CAD>",
+  "summary": "<1-2 sentence semantic summary of counterparty intent>"
+}}
 
 Rules:
-- Output valid JSON only without markdown fences or additional commentary.
-- If incoterm is unspecified: assume 'CIF' for buyers and 'FOB' for suppliers.
-- If quantity is unspecified: default to 500.0 MT.
+1. Output valid JSON only without markdown code fences or conversational preamble.
+2. If the counterparty agrees, accepts, confirms, or directs the desk to proceed/contract without citing a new numeric price:
+   - Set "intent": "ACCEPTANCE"
+   - Set "is_acceptance": true
+   - Set "price_usd_per_mt": {last_proposed_price:.2f}
+3. If the counterparty proposes a counter-bid, adjustment, or different price:
+   - Set "intent": "COUNTER_OFFER"
+   - Set "is_acceptance": false
+   - Extract their quoted price into "price_usd_per_mt".
+4. If the counterparty declines, rejects, or walks away:
+   - Set "intent": "REJECTION"
+   - Set "is_acceptance": false
+5. If incoterm is unspecified: assume 'CIF' for buyers and 'FOB' for suppliers.
+6. If quantity is unspecified: default to {default_volume_mt:,.0f} MT.
 
-Email to parse:
+Incoming Email:
 \"\"\"
 {raw_email}
 \"\"\"

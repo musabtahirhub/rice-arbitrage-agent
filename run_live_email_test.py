@@ -1,13 +1,3 @@
-"""
-Interactive Live Email Runner for physical commodity arbitrage negotiation.
-Conducts dynamic, end-to-end multi-turn email negotiations with real email inboxes.
-
-Usage:
-  python run_live_email_test.py [optional_recipient_email]
-
-Requirements for live SMTP/IMAP transport:
-  Set EMAIL_USER, EMAIL_PASS, and MY_TEST_EMAIL in .env (or provide via console).
-"""
 import sys
 import time
 import uuid
@@ -30,7 +20,6 @@ def run_live_email_negotiation(recipient_email: str | None = None):
     print("  COMMODITY ARBITRAGE DESK — LIVE GMAIL NEGOTIATION RUNNER")
     print("=" * 72)
 
-    # 1. Resolve target test email
     target_email = recipient_email or settings.my_test_email
     if not target_email:
         if len(sys.argv) > 1:
@@ -56,7 +45,6 @@ def run_live_email_negotiation(recipient_email: str | None = None):
         print("          Please set EMAIL_USER and EMAIL_PASS to test with real Gmail.")
         print("          Falling back to interactive console input for buyer responses.\n")
 
-    # 2. Initialize campaign
     cid = f"CAMP-{uuid.uuid4().hex[:6].upper()}"
     campaign = Campaign(
         campaign_id=cid,
@@ -70,84 +58,49 @@ def run_live_email_negotiation(recipient_email: str | None = None):
         max_negotiation_rounds=3,
     )
 
-    benchmark_fob = get_benchmark_rate(campaign.commodity)
-    freight = estimate_freight(campaign.origin_port_default, campaign.destination_port)
-    bounds = calculate_dynamic_bounds(
-        benchmark_fob=benchmark_fob,
-        freight=freight,
-        max_variance_pct=campaign.max_variance_from_benchmark_pct,
-        target_margin_pct=campaign.target_margin_pct,
-        buffer_usd=campaign.buffer_usd_per_mt,
-    )
-
-    buffer_usd = campaign.buffer_usd_per_mt or settings.default_buffer_usd_per_mt
-    anchor_cif = round(benchmark_fob + freight + buffer_usd + campaign.min_profit_per_mt_soft + 30.0, 2)
-
-    # 3. Snapshot existing unread email IDs so old messages are never treated as new replies
     baseline_unseen_ids = get_unseen_message_ids() if live_transport else set()
 
-    # 4. Generate dynamic Cold SCO with Gemini LLM
-    print("\n[AI DRAFTING] Composing dynamic Proactive Cold SCO via Gemini...")
-    sco_draft = generate_proactive_sco_draft(
-        campaign=campaign,
-        anchor_cif=anchor_cif,
-        buyer_name="Institutional Procurement Partner",
-        buyer_email=target_email,
-    )
+    print("\n[AI DRAFTING] Launching proactive outreach node natively via trade_graph...")
+    initial_state: DealState = {
+        "campaign": campaign,
+        "negotiation_round": 0,
+        "deal_status": "initiating",
+        "action": None,
+        "pipeline_step": 0,
+        "is_deal_viable": False,
+        "net_spread_usd": 0.0,
+        "net_margin_pct": 0.0,
+        "latest_email": "",
+        "active_role": "buyer",
+        "buyer_terms": None,
+        "supplier_terms": None,
+        "buyer_draft": "",
+        "supplier_draft": "",
+        "audit_transcript": [],
+        "target_buyer_email": target_email,
+        "target_buyer_name": "Institutional Procurement Partner",
+    }
+    state = trade_graph.invoke(initial_state)
 
+    if state.get("supplier_terms") is None:
+        state["supplier_terms"] = ParsedEmail(
+            sender_role="supplier",
+            commodity=campaign.commodity,
+            quantity_mt=campaign.target_volume_mt,
+            price_usd_per_mt=state.get("benchmark_fob_usd", 900.0),
+            incoterm="FOB",
+            port=campaign.origin_port_default,
+            payment_terms=settings.default_payment_terms,
+        )
+
+    sco_draft = state.get("buyer_draft", "")
     sco_subject, sco_body = parse_email_draft(sco_draft)
     print("\n" + "-" * 72)
     print(f"OUTBOUND EMAIL DRAFT (Turn 0):\nSUBJECT: {sco_subject}\n\n{sco_body}")
     print("-" * 72)
-
-    # Initialize DealState
-    state: DealState = {
-        "campaign": campaign,
-        "benchmark_fob_usd": benchmark_fob,
-        "freight_cost_usd": freight,
-        "dynamic_fob_ceiling": bounds["dynamic_fob_ceiling"],
-        "dynamic_cif_floor": bounds["dynamic_cif_floor"],
-        "target_fob_ceiling": 0.0,
-        "anchor_cif_usd": anchor_cif,
-        "buyer_terms": None,
-        "supplier_terms": ParsedEmail(
-            sender_role="supplier",
-            commodity=campaign.commodity,
-            quantity_mt=campaign.target_volume_mt,
-            price_usd_per_mt=benchmark_fob,
-            incoterm="FOB",
-            port=campaign.origin_port_default,
-            payment_terms=settings.default_payment_terms,
-        ),
-        "negotiation_round": 0,
-        "deal_status": "prospecting",
-        "action": None,
-        "pipeline_step": 1,
-        "is_deal_viable": False,
-        "net_spread_usd": 0.0,
-        "net_margin_pct": 0.0,
-        "evaluation_reason": "Proactive Cold SCO dispatched dynamically with Gemini.",
-        "latest_email": "",
-        "active_role": "buyer",
-        "buyer_draft": sco_draft,
-        "supplier_draft": "",
-        "audit_transcript": [{
-            "turn": 0,
-            "sender": f"Trading Desk ({settings.desk_name})",
-            "recipient": target_email,
-            "role": "agent",
-            "action": "OUTBOUND_SCO",
-            "subject": sco_subject,
-            "message": sco_draft,
-        }],
-    }
-
-    # 5. Send initial Cold SCO
-    send_email(target_email, sco_draft)
     print("\n[OUTBOUND] Dispatched Cold SCO. Entering IMAP listening loop...")
 
-    # Snippet used to match incoming replies for this commodity
-    expected_snippet = campaign.commodity.split()[0].lower()  # e.g. "basmati"
+    expected_snippet = campaign.commodity.split()[0].lower()
     poll_round = 0
 
     try:
@@ -160,12 +113,12 @@ def run_live_email_negotiation(recipient_email: str | None = None):
                 incoming_text = check_latest_reply(
                     expected_subject_snippet=expected_snippet,
                     ignore_message_ids=baseline_unseen_ids,
+                    allowed_senders={target_email.lower()} if target_email else None,
                 )
                 if not incoming_text:
                     time.sleep(10)
                     continue
             else:
-                # Console input simulation if live credentials not configured
                 print("\n[MANUAL CONSOLE INPUT] Type buyer's counter-offer (or 'quit' to exit):")
                 try:
                     user_input = input("Buyer Reply: ").strip()
@@ -176,10 +129,16 @@ def run_live_email_negotiation(recipient_email: str | None = None):
                     break
                 incoming_text = user_input
 
-            # Detected real incoming reply
             print(f"\n[INBOUND] Received reply: '{incoming_text}'")
 
-            # Feed incoming reply into LangGraph trade state machine
+            in_msg_id = getattr(incoming_text, "message_id", "")
+            in_refs = getattr(incoming_text, "references", "")
+            if in_msg_id:
+                state["last_buyer_message_id"] = in_msg_id
+                cur_refs = state.get("buyer_references") or in_refs or ""
+                if in_msg_id not in cur_refs:
+                    state["buyer_references"] = f"{cur_refs} {in_msg_id}".strip()
+
             state["latest_email"] = incoming_text
             state["active_role"] = "buyer"
 
@@ -197,7 +156,6 @@ def run_live_email_negotiation(recipient_email: str | None = None):
             print(f"[METRICS] Net Spread: ${net_spread:.2f}/MT | Net Margin: {net_margin:.2f}%")
             print(f"[REASON]  {reason}")
 
-            # Outbound response generated dynamically by Gemini
             outbound_msg = state.get("buyer_draft", "")
             out_sub, out_body = parse_email_draft(outbound_msg)
 
@@ -205,11 +163,21 @@ def run_live_email_negotiation(recipient_email: str | None = None):
             print(f"OUTBOUND AGENT RESPONSE ({action}):\nSUBJECT: {out_sub}\n\n{out_body}")
             print("-" * 72)
 
-            # Dispatch outbound email back to buyer
-            send_email(target_email, outbound_msg)
-            print(f"[OUTBOUND] Dispatched response ({action}) to {target_email}.")
+            response_msg_id = email.utils.make_msgid(domain=desk_domain)
+            send_email(
+                target_email,
+                outbound_msg,
+                in_reply_to=state.get("last_buyer_message_id"),
+                references=state.get("buyer_references"),
+                thread_subject=state.get("thread_subject"),
+                custom_message_id=response_msg_id,
+            )
+            state["last_buyer_message_id"] = response_msg_id
+            cur_refs = state.get("buyer_references") or ""
+            state["buyer_references"] = f"{cur_refs} {response_msg_id}".strip()
 
-            # If deal is concluded, print final summary and exit loop
+            print(f"[OUTBOUND] Dispatched response ({action}) to {target_email} in thread: '{state.get('thread_subject')}'.")
+
             if action in ["ACCEPT_AND_CLOSE", "REJECT_HARD"] or deal_status in ["closed", "rejected"]:
                 print("\n" + "=" * 72)
                 print(f"  NEGOTIATION COMPLETE: Deal {deal_status.upper()}! Final Net Spread: ${net_spread:.2f}/MT")

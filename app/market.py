@@ -1,8 +1,3 @@
-"""
-Real-world live market benchmark pricing scraper and dynamic container freight estimator.
-Fetches FOB export rates from public commodity boards (Thai Rice Exporters Association),
-with a 6-hour local JSON cache (market_cache.json) and graceful baseline fallbacks.
-"""
 import json
 import logging
 import os
@@ -17,11 +12,9 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-# Cache file path and Time-To-Live dynamically loaded from settings
 CACHE_FILE = Path(__file__).resolve().parent.parent / settings.market_cache_file
 CACHE_TTL_SECONDS = settings.market_cache_ttl_seconds
 
-# Baseline static rates in USD/MT FOB (used as fallback when web feeds are offline)
 STATIC_BENCHMARKS: dict[str, float] = {
     "basmati 1121": settings.default_benchmark_rate,
     "super kernel basmati": 980.0,
@@ -35,7 +28,6 @@ STATIC_BENCHMARKS: dict[str, float] = {
 }
 BASELINE_BENCHMARKS = STATIC_BENCHMARKS
 
-# Base container ocean freight matrix per MT in USD (standard 20ft container loads)
 BASE_FREIGHT_MATRIX: dict[tuple[str, str], float] = {
     ("karachi", "jebel ali"): 45.0,
     ("karachi", "dammam"): 50.0,
@@ -52,11 +44,10 @@ DEFAULT_FREIGHT = settings.default_freight_rate
 YAHOO_RICE_URL = "https://query1.finance.yahoo.com/v8/finance/chart/ZR=F?interval=1d&range=5d"
 LIVE_URL = settings.market_source_url
 CWT_TO_MT_FACTOR = 22.046
-BASE_ROUGH_RICE_CWT = 16.0  # Base reference rough rice price ($16.00/cwt ≈ $352.74/MT)
+BASE_ROUGH_RICE_CWT = 16.0
 
 
 def _load_cache() -> Optional[dict]:
-    """Read cached market data if it exists and has not expired."""
     if not CACHE_FILE.exists():
         return None
     try:
@@ -71,7 +62,6 @@ def _load_cache() -> Optional[dict]:
 
 
 def _save_cache(payload: dict) -> None:
-    """Persist market data and timestamps to market_cache.json."""
     try:
         with open(CACHE_FILE, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
@@ -80,12 +70,6 @@ def _save_cache(payload: dict) -> None:
 
 
 def parse_yahoo_finance_json(data: dict) -> tuple[float, dict[str, float]]:
-    """
-    Parse Yahoo Finance JSON response for Rough Rice futures (ZR=F):
-    1. Extract regularMarketPrice in USD/cwt.
-    2. Convert price per cwt to USD per Metric Ton (1 MT ≈ 22.046 cwt).
-    3. Use dynamic base index to scale commodity benchmarks (Basmati, Thai White, Jasmine).
-    """
     meta = data.get("chart", {}).get("result", [{}])[0].get("meta", {})
     cwt_price = meta.get("regularMarketPrice")
 
@@ -97,7 +81,6 @@ def parse_yahoo_finance_json(data: dict) -> tuple[float, dict[str, float]]:
     cwt_price = float(cwt_price)
     rough_rice_usd_mt = round(cwt_price * CWT_TO_MT_FACTOR, 2)
 
-    # Dynamic scaling multiplier relative to base benchmark ($16.00/cwt ≈ $352.74/MT)
     scale_ratio = cwt_price / BASE_ROUGH_RICE_CWT
 
     scaled_rates = {}
@@ -109,9 +92,6 @@ def parse_yahoo_finance_json(data: dict) -> tuple[float, dict[str, float]]:
 
 
 def parse_thai_rice_html(html_text: str) -> dict[str, float]:
-    """
-    Parse HTML table from Thai Rice Exporters Association to extract FOB export prices (fallback parser).
-    """
     soup = BeautifulSoup(html_text, "html.parser")
     extracted = {}
 
@@ -156,10 +136,6 @@ def parse_thai_rice_html(html_text: str) -> dict[str, float]:
 
 
 def fetch_live_market_data(force_refresh: bool = False, timeout: Optional[float] = None) -> dict[str, float]:
-    """
-    Fetch live benchmark prices from Yahoo Finance Rough Rice (ZR=F) feed with
-    a 6-hour local JSON cache (market_cache.json) and graceful baseline fallbacks.
-    """
     timeout = timeout or settings.market_fetch_timeout_seconds
     if not force_refresh:
         cached = _load_cache()
@@ -191,7 +167,6 @@ def fetch_live_market_data(force_refresh: bool = False, timeout: Optional[float]
     except Exception as exc:
         logger.warning(f"Could not fetch live market rates from {target_url} ({exc}). Using cached/baseline values.")
 
-    # Persist in local cache file
     cache_payload = {
         "timestamp": time.time(),
         "source": source,
@@ -207,10 +182,6 @@ def fetch_live_market_data(force_refresh: bool = False, timeout: Optional[float]
 
 
 def get_benchmark_rate(commodity: str, broken_pct: float = 5.0) -> float:
-    """
-    Look up the live FOB benchmark rate for a commodity variety.
-    Applies quality discount if broken grain percentage exceeds standard 5%.
-    """
     rates = fetch_live_market_data()
     comm_key = commodity.lower().strip()
 
@@ -224,19 +195,14 @@ def get_benchmark_rate(commodity: str, broken_pct: float = 5.0) -> float:
     if rate is None:
         rate = DEFAULT_BENCHMARK
 
-    # Adjust price downwards if broken percentage exceeds standard 5%
     if broken_pct > 5.0:
-        penalty_factor = (broken_pct - 5.0) * 0.005  # 0.5% discount per 1% excess broken
+        penalty_factor = (broken_pct - 5.0) * 0.005
         rate = rate * (1.0 - min(penalty_factor, 0.20))
 
     return round(rate, 2)
 
 
 def estimate_freight(origin_port: str, destination_port: str, fuel_surcharge_pct: Optional[float] = None) -> float:
-    """
-    Dynamic container freight estimator calculating port-to-port ocean rates
-    with lane averages, fuel surcharges, and caching in market_cache.json.
-    """
     if fuel_surcharge_pct is None:
         fuel_surcharge_pct = settings.default_fuel_surcharge_pct
 
@@ -255,10 +221,8 @@ def estimate_freight(origin_port: str, destination_port: str, fuel_surcharge_pct
     if base_rate is None:
         base_rate = DEFAULT_FREIGHT
 
-    # Apply dynamic fuel/bunker surcharge (BAF)
     effective_freight = round(base_rate * (1.0 + fuel_surcharge_pct / 100.0), 2)
 
-    # Store calculation in market cache
     cached = _load_cache() or {"timestamp": time.time(), "rates": BASELINE_BENCHMARKS, "freight_quotes": {}}
     lane_key = f"{orig}->{dest}"
     if "freight_quotes" not in cached:

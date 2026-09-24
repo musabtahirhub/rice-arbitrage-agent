@@ -1,15 +1,13 @@
-"""
-LangGraph State Machine for physical commodity arbitrage negotiation.
-Orchestrates email parsing, market grounding, deterministic risk gatekeeping,
-and counter-offer drafting.
-"""
+import email.utils
 import json
 import re
-from typing import Literal
+from typing import Literal, Optional
 from langgraph.graph import StateGraph, END
 
 from app.config import settings
-from app.directory import get_suppliers_for_commodity
+from app.directory import get_buyers_for_commodity, get_suppliers_for_commodity
+from app.email_service import send_email
+from app.logger import get_logger
 from app.market import get_benchmark_rate, estimate_freight
 from app.math_engine import calculate_dynamic_bounds, evaluate_deal
 from app.models import Campaign, DealState, ParsedEmail
@@ -22,22 +20,15 @@ from app.prompts import (
     SUPPLIER_RFQ_PROMPT,
 )
 
+logger = get_logger("arbitrage_desk.workflow")
 
-# ---------------------------------------------------------------------------
-# Dynamic LLM Drafting & Parsing Helpers
-# ---------------------------------------------------------------------------
 
 def split_subject_and_body(raw_text: str, default_subject: str = "Trade Correspondence") -> tuple[str, str]:
-    """
-    Extract SUBJECT and BODY from dynamic LLM generation.
-    Handles 'SUBJECT: ...\nBODY:\n...' format as well as standard RFC Subject headers.
-    """
     if not raw_text:
         return default_subject, ""
 
     raw = raw_text.strip()
 
-    # Format 1: Strict SUBJECT: ... and BODY: ... format
     sub_match = re.search(r"^SUBJECT:\s*(.+)$", raw, re.MULTILINE | re.IGNORECASE)
     body_match = re.search(r"BODY:\s*\n?(.*)$", raw, re.DOTALL | re.IGNORECASE)
     if sub_match and body_match:
@@ -45,14 +36,12 @@ def split_subject_and_body(raw_text: str, default_subject: str = "Trade Correspo
         body = body_match.group(1).strip()
         return subject, body
 
-    # Format 2: Standard RFC/Markdown 'Subject: ...\n\n...'
     if raw.lower().startswith("subject:"):
         parts = raw.split("\n\n", 1)
         sub = re.sub(r"^subject:\s*", "", parts[0], flags=re.IGNORECASE).strip()
         body = parts[1].strip() if len(parts) > 1 else ""
         return sub, body
 
-    # Format 3: Subject line on first line without empty line
     first_line, _, rest = raw.partition("\n")
     if first_line.lower().startswith("subject:"):
         sub = re.sub(r"^subject:\s*", "", first_line, flags=re.IGNORECASE).strip()
@@ -62,11 +51,6 @@ def split_subject_and_body(raw_text: str, default_subject: str = "Trade Correspo
 
 
 def generate_dynamic_llm_draft(prompt: str, fallback_subject: str, fallback_body: str) -> str:
-    """
-    Invoke Gemini LLM dynamically to write contextual subject and authentic body.
-    If LLM API is available and succeeds, returns formatted draft 'Subject: <subject>\n\n<body>'.
-    Falls back to safe deterministic fallback if API key is missing or call fails/times out.
-    """
     if settings.gemini_api_key:
         try:
             import google.generativeai as genai
@@ -92,9 +76,6 @@ def generate_proactive_sco_draft(
     buyer_name: str = "Procurement Partner",
     buyer_email: str = "procurement@domain.com",
 ) -> str:
-    """
-    Generate dynamic proactive Cold SCO using Gemini LLM (PROACTIVE_COLD_SCO_PROMPT).
-    """
     prompt = PROACTIVE_COLD_SCO_PROMPT.format(
         desk_name=settings.desk_name,
         buyer_name=buyer_name,
@@ -121,15 +102,12 @@ def generate_proactive_sco_draft(
     return generate_dynamic_llm_draft(prompt, fallback_sub, fallback_body)
 
 
-# ---------------------------------------------------------------------------
-# LLM / Regex Parser Helper
-# ---------------------------------------------------------------------------
+def _parse_email_content(raw_text: str, role: str, deal_context: Optional[dict] = None) -> ParsedEmail:
+    ctx = deal_context or {}
+    last_proposed_price = ctx.get("last_proposed_price", 1111.0)
+    commodity = ctx.get("commodity", settings.default_commodity)
+    default_volume_mt = ctx.get("default_volume_mt", settings.default_target_volume_mt)
 
-def _parse_email_content(raw_text: str, role: str) -> ParsedEmail:
-    """
-    Extract commercial terms using Gemini if API key is present,
-    otherwise fallback to reliable regex pattern matching.
-    """
     if settings.gemini_api_key:
         try:
             import google.generativeai as genai
@@ -138,22 +116,42 @@ def _parse_email_content(raw_text: str, role: str) -> ParsedEmail:
                 settings.gemini_model,
                 generation_config={"temperature": settings.llm_temperature},
             )
-            prompt = EMAIL_PARSER_PROMPT.format(raw_email=raw_text)
+            prompt = EMAIL_PARSER_PROMPT.format(
+                role=role,
+                last_proposed_price=last_proposed_price,
+                commodity=commodity,
+                default_volume_mt=default_volume_mt,
+                raw_email=raw_text,
+            )
             resp = model.generate_content(prompt)
             clean_text = resp.text.strip().removeprefix("```json").removesuffix("```").strip()
             data = json.loads(clean_text)
-            return ParsedEmail(**data)
-        except Exception:
-            pass
+            parsed = ParsedEmail(**data)
+            logger.info(
+                f"[LLM PARSER] Inbound email parsed for role='{role}': "
+                f"intent='{parsed.intent}', is_acceptance={parsed.is_acceptance}, "
+                f"price=${parsed.price_usd_per_mt:.2f}/MT, qty={parsed.quantity_mt:,.0f}MT, "
+                f"port='{parsed.port}', summary='{parsed.summary}'"
+            )
+            return parsed
+        except Exception as exc:
+            logger.warning(
+                f"[LLM PARSER] Semantic LLM extraction unavailable ({exc.__class__.__name__}: {exc}). "
+                f"Switching to deterministic regex parser."
+            )
 
-    # Deterministic Regex Fallback Parser
     p_match = re.search(r"(?:USD|US\$|\$)\s*([\d,]+(?:\.\d+)?)", raw_text, re.IGNORECASE)
     if not p_match:
         p_match = re.search(r"([\d,]+(?:\.\d+)?)\s*(?:USD|US\$|\$|per\s*MT|/\s*MT)", raw_text, re.IGNORECASE)
     price = float(p_match.group(1).replace(",", "")) if p_match else 0.0
 
+    is_acceptance = bool(re.search(r"\b(accept|agreed|agreement|confirm|proceed|deal|order|allocation)\b", raw_text, re.IGNORECASE))
+    intent = "ACCEPTANCE" if is_acceptance else ("COUNTER_OFFER" if price > 0 else "INQUIRY")
+    if price <= 0.0 and is_acceptance:
+        price = last_proposed_price
+
     qty_match = re.search(r"(\d[\d,]*)\s*(?:MT|metric\s*ton)", raw_text, re.IGNORECASE)
-    quantity = float(qty_match.group(1).replace(",", "")) if qty_match else settings.default_target_volume_mt
+    quantity = float(qty_match.group(1).replace(",", "")) if qty_match else default_volume_mt
 
     incoterm = "CIF" if "cif" in raw_text.lower() else ("FOB" if "fob" in raw_text.lower() else ("CIF" if role == "buyer" else "FOB"))
 
@@ -169,40 +167,179 @@ def _parse_email_content(raw_text: str, role: str) -> ParsedEmail:
     elif "bangkok" in raw_text.lower():
         port = "Bangkok"
 
-    return ParsedEmail(
+    fallback_parsed = ParsedEmail(
         sender_role=role,
-        commodity=settings.default_commodity,
+        commodity=commodity,
         quantity_mt=quantity,
         price_usd_per_mt=price,
         incoterm=incoterm,
         port=port,
         payment_terms=settings.default_payment_terms,
+        intent=intent,
+        is_acceptance=is_acceptance,
+        summary="Extracted via deterministic fallback parser",
+    )
+    logger.info(
+        f"[REGEX PARSER] Fallback extracted terms for '{role}': intent='{fallback_parsed.intent}', "
+        f"is_acceptance={fallback_parsed.is_acceptance}, price=${fallback_parsed.price_usd_per_mt:.2f}/MT, "
+        f"qty={fallback_parsed.quantity_mt:,.0f}MT, port='{fallback_parsed.port}'"
+    )
+    return fallback_parsed
+
+
+def proactive_outreach_node(state: DealState) -> dict:
+    campaign: Campaign = state["campaign"]
+    commodity = campaign.commodity
+    volume = campaign.target_volume_mt
+    dest_port = campaign.destination_port
+    origin_port = campaign.origin_port_default
+
+    if state.get("pipeline_step", 0) >= 1 or state.get("deal_status") in ["prospecting", "counter_sent", "approved", "closed", "rejected"]:
+        logger.info(
+            f"[WORKFLOW:Proactive Outreach] Campaign '{campaign.campaign_id}' has already initiated outreach "
+            f"(status: '{state.get('deal_status')}', step: {state.get('pipeline_step')}). Waiting for counterparty reply."
+        )
+        return dict(state)
+
+    buyers = get_buyers_for_commodity(commodity)
+    suppliers = get_suppliers_for_commodity(commodity)
+    me_buyers = [b for b in buyers if b.country in ["UAE", "Saudi Arabia", "Qatar", "Kuwait", "Oman", "Bahrain"]]
+    primary_buyer = me_buyers[0] if me_buyers else (buyers[0] if buyers else None)
+
+    buyer_name = state.get("target_buyer_name") or (primary_buyer.name if primary_buyer else "Procurement Partner")
+    buyer_email = primary_buyer.contact_email if primary_buyer else "procurement@domain.com"
+    target_buyer_email = state.get("target_buyer_email") or settings.my_test_email or buyer_email
+
+    benchmark_fob = state.get("benchmark_fob_usd") or get_benchmark_rate(commodity, campaign.broken_percentage)
+    freight = state.get("freight_cost_usd") or estimate_freight(origin_port, dest_port)
+    buffer_usd = campaign.buffer_usd_per_mt if campaign.buffer_usd_per_mt is not None else settings.default_buffer_usd_per_mt
+
+    bounds = calculate_dynamic_bounds(
+        benchmark_fob=benchmark_fob,
+        freight=freight,
+        max_variance_pct=campaign.max_variance_from_benchmark_pct,
+        target_margin_pct=campaign.target_margin_pct,
+        buffer_usd=buffer_usd,
     )
 
+    anchor_cif = state.get("anchor_cif_usd") or round(benchmark_fob + freight + buffer_usd + campaign.min_profit_per_mt_soft + 30.0, 2)
 
-# ---------------------------------------------------------------------------
-# LangGraph Workflow Nodes
-# ---------------------------------------------------------------------------
+    initial_buyer_draft = generate_proactive_sco_draft(
+        campaign=campaign,
+        anchor_cif=anchor_cif,
+        buyer_name=buyer_name,
+        buyer_email=target_buyer_email,
+    )
+    sco_subject, _ = split_subject_and_body(
+        initial_buyer_draft,
+        default_subject=f"Soft Corporate Offer (SCO) — {commodity} CIF {dest_port}",
+    )
+
+    clean_desk_user = settings.email_user.strip()
+    desk_domain = clean_desk_user.split("@")[1] if "@" in clean_desk_user else "gmail.com"
+    sco_msg_id = email.utils.make_msgid(domain=desk_domain)
+
+    if not state.get("skip_email_dispatch", False) and target_buyer_email:
+        send_email(
+            to_email=target_buyer_email,
+            raw_draft=initial_buyer_draft,
+            thread_subject=None,
+            custom_message_id=sco_msg_id,
+        )
+        if bool(settings.email_user and settings.email_pass):
+            logger.info(
+                f"[CAMPAIGN START] Dispatched initial SCO to '{target_buyer_email}' | "
+                f"Campaign: '{campaign.campaign_id}' | Subject: '{sco_subject}' | Message-ID: '{sco_msg_id}'"
+            )
+        else:
+            logger.info(
+                f"[CAMPAIGN START] Initial Cold SCO drafted for '{buyer_name}' ({target_buyer_email}). "
+                f"Live SMTP skipped (transport credentials not configured)."
+            )
+
+    outbound_sco_entry = {
+        "turn": 0,
+        "sender": f"Trading Desk ({settings.desk_name})",
+        "recipient": f"{buyer_name} <{target_buyer_email}>",
+        "role": "agent",
+        "action": "OUTBOUND_SCO",
+        "subject": sco_subject,
+        "message": initial_buyer_draft,
+    }
+
+    transcript = list(state.get("audit_transcript") or [])
+    transcript.append(outbound_sco_entry)
+
+    logger.info(
+        f"[WORKFLOW:Proactive Outreach] Campaign '{campaign.campaign_id}' pitched {commodity} ({volume:,.0f} MT) "
+        f"to {buyer_name} ({target_buyer_email}) at anchor USD {anchor_cif:.2f}/MT CIF {dest_port}"
+    )
+
+    return {
+        "campaign": campaign,
+        "benchmark_fob_usd": benchmark_fob,
+        "freight_cost_usd": freight,
+        "dynamic_fob_ceiling": bounds["dynamic_fob_ceiling"],
+        "dynamic_cif_floor": bounds["dynamic_cif_floor"],
+        "target_fob_ceiling": 0.0,
+        "anchor_cif_usd": anchor_cif,
+        "buyer_terms": None,
+        "supplier_terms": None,
+        "negotiation_round": 0,
+        "deal_status": "prospecting",
+        "action": None,
+        "pipeline_step": 1,
+        "is_deal_viable": False,
+        "net_spread_usd": 0.0,
+        "net_margin_pct": 0.0,
+        "evaluation_reason": f"Proactive SCO dispatched to {buyer_name} at USD {anchor_cif:.2f}/MT CIF. Discovered {len(buyers)} buyers and {len(suppliers)} suppliers.",
+        "buyer_draft": initial_buyer_draft,
+        "supplier_draft": "",
+        "audit_transcript": transcript,
+        "thread_subject": sco_subject,
+        "last_buyer_message_id": sco_msg_id,
+        "buyer_references": sco_msg_id,
+        "last_supplier_message_id": None,
+        "supplier_references": None,
+        "discovered_buyers": [b.model_dump() for b in buyers],
+        "discovered_suppliers": [s.model_dump() for s in suppliers],
+    }
+
 
 def parse_incoming_email_node(state: DealState) -> dict:
-    """
-    Node 1: Extract structured trade terms from the latest inbound email.
-    When buyer signals interest, lock buyer_terms and auto-draft supplier RFQ with target FOB ceiling.
-    """
     raw_email = state.get("latest_email", "")
     role = state.get("active_role", "buyer")
-    terms = _parse_email_content(raw_email, role)
     campaign: Campaign = state["campaign"]
 
+    desk_proposed_rate = (
+        state.get("last_counter_cif_usd")
+        or state.get("dynamic_cif_floor")
+        or state.get("anchor_cif_usd")
+        or 1111.0
+    )
+    deal_context = {
+        "last_proposed_price": desk_proposed_rate,
+        "commodity": campaign.commodity,
+        "default_volume_mt": campaign.target_volume_mt,
+    }
+
+    terms = _parse_email_content(raw_email, role, deal_context=deal_context)
     updates = {}
     if role == "buyer":
+        if terms.is_acceptance or terms.intent == "ACCEPTANCE":
+            updates["buyer_accepted"] = True
+            if terms.price_usd_per_mt <= 0.0:
+                terms.price_usd_per_mt = desk_proposed_rate
+
         updates["buyer_terms"] = terms
         updates["pipeline_step"] = 2
-        # Sequential Sourcing Progression: If supplier terms not yet locked, auto-draft RFQ to Asian mill
+        logger.info(
+            f"[WORKFLOW:Node 1] Ingested buyer terms: price=${terms.price_usd_per_mt:.2f}/MT, "
+            f"intent='{terms.intent}', buyer_accepted={updates.get('buyer_accepted', False)}"
+        )
         if not state.get("supplier_terms"):
             freight = state.get("freight_cost_usd") or estimate_freight(campaign.origin_port_default, campaign.destination_port)
             buffer_usd = campaign.buffer_usd_per_mt if campaign.buffer_usd_per_mt is not None else settings.default_buffer_usd_per_mt
-            # Target FOB acquisition ceiling based on buyer CIF minus ocean freight, buffer, and soft margin
             target_fob_ceiling = round(terms.price_usd_per_mt - freight - buffer_usd - campaign.min_profit_per_mt_soft, 2)
             updates["target_fob_ceiling"] = target_fob_ceiling
             updates["pipeline_step"] = 3
@@ -239,12 +376,15 @@ def parse_incoming_email_node(state: DealState) -> dict:
     else:
         updates["supplier_terms"] = terms
         updates["pipeline_step"] = 3
+        logger.info(
+            f"[WORKFLOW:Node 1] Ingested supplier terms: price=${terms.price_usd_per_mt:.2f}/MT FOB, "
+            f"port='{terms.port}', qty={terms.quantity_mt:,.0f}MT"
+        )
 
     return updates
 
 
 def fetch_market_data_node(state: DealState) -> dict:
-    """Node 2: Fetch benchmark index rate and ocean freight estimate."""
     campaign: Campaign = state["campaign"]
     benchmark_fob = get_benchmark_rate(campaign.commodity, campaign.broken_percentage)
     freight = estimate_freight(campaign.origin_port_default, campaign.destination_port)
@@ -266,13 +406,13 @@ def fetch_market_data_node(state: DealState) -> dict:
 
 
 def evaluate_risk_node(state: DealState) -> dict:
-    """Node 3: Deterministic risk evaluator (margin math + invariant enforcement + tactical hurdles)."""
     campaign: Campaign = state["campaign"]
     buyer = state.get("buyer_terms")
     supplier = state.get("supplier_terms")
     benchmark_fob = state.get("benchmark_fob_usd", 900.0)
     freight = state.get("freight_cost_usd", 50.0)
     curr_round = state.get("negotiation_round", 0) + 1
+    buyer_accepted = bool(state.get("buyer_accepted", False))
 
     result = evaluate_deal(
         campaign=campaign,
@@ -281,29 +421,35 @@ def evaluate_risk_node(state: DealState) -> dict:
         benchmark_fob=benchmark_fob,
         freight=freight,
         round_num=curr_round,
+        buyer_accepted=buyer_accepted,
+    )
+
+    action = result.get("action")
+    net_spread = result.get("net_spread", 0.0)
+    net_margin = result.get("net_margin_pct", 0.0)
+    reason = result.get("reason", "")
+
+    logger.info(
+        f"[WORKFLOW:Node 3 Risk] Round {curr_round} Evaluation: action='{action}', "
+        f"viable={result['viable']}, net_spread=${net_spread:.2f}/MT, margin={net_margin:.2f}%, "
+        f"reason='{reason}'"
     )
 
     return {
         "is_deal_viable": result["viable"],
-        "action": result.get("action"),
-        "net_spread_usd": result.get("net_spread", 0.0),
-        "net_margin_pct": result["net_margin_pct"],
-        "evaluation_reason": result["reason"],
+        "action": action,
+        "net_spread_usd": net_spread,
+        "net_margin_pct": net_margin,
+        "evaluation_reason": reason,
         "negotiation_round": curr_round,
     }
 
 
 def confirm_deal_node(state: DealState) -> dict:
-    """
-    Node 4A: Deal Viable & Approved (Spread meets soft target or finalized after bargaining rounds).
-    Enforces Zero-Risk Invariant: Supplier allocation is locked first, followed by buyer acceptance.
-    Both correspondence pieces are dynamically composed by Gemini LLM.
-    """
     buyer = state.get("buyer_terms")
     supplier = state.get("supplier_terms")
     campaign: Campaign = state["campaign"]
 
-    # 1. Dynamic Supplier Volume Lock Confirmation
     supp_prompt = DEAL_CONFIRMATION_PROMPT.format(
         desk_name=settings.desk_name,
         recipient_role="supplier",
@@ -325,7 +471,6 @@ def confirm_deal_node(state: DealState) -> dict:
     )
     supplier_msg = generate_dynamic_llm_draft(supp_prompt, fallback_supp_sub, fallback_supp_body)
 
-    # 2. Dynamic Buyer SCO Acceptance Confirmation
     buyer_prompt = DEAL_CONFIRMATION_PROMPT.format(
         desk_name=settings.desk_name,
         recipient_role="buyer",
@@ -347,6 +492,12 @@ def confirm_deal_node(state: DealState) -> dict:
     )
     buyer_msg = generate_dynamic_llm_draft(buyer_prompt, fallback_buyer_sub, fallback_buyer_body)
 
+    logger.info(
+        f"[WORKFLOW:Node 4A Confirm] Deal viable & approved! "
+        f"Locked supplier allocation at ${supplier.price_usd_per_mt if supplier else 0.0:.2f}/MT {supplier.incoterm if supplier else 'FOB'}, "
+        f"accepted buyer at ${buyer.price_usd_per_mt if buyer else 0.0:.2f}/MT {buyer.incoterm if buyer else 'CIF'}. Deal CLOSED."
+    )
+
     return {
         "deal_status": "closed",
         "pipeline_step": 4,
@@ -357,7 +508,6 @@ def confirm_deal_node(state: DealState) -> dict:
 
 
 def counter_buyer_node(state: DealState) -> dict:
-    """Node 4B: Deal Non-Viable or Tactical Margin Concession — Draft counter-offer to buyer."""
     cif_floor = state.get("dynamic_cif_floor", 1000.0)
     campaign: Campaign = state["campaign"]
     buyer = state.get("buyer_terms")
@@ -404,14 +554,19 @@ def counter_buyer_node(state: DealState) -> dict:
 
     buyer_msg = generate_dynamic_llm_draft(buyer_prompt, fallback_sub, fallback_body)
 
+    logger.info(
+        f"[WORKFLOW:Node 4B Counter Buyer] Round {curr_round}: Action='{action}', "
+        f"countering buyer at USD {target_price:.2f}/MT CIF {campaign.destination_port} (Reason: {reason})"
+    )
+
     return {
         "deal_status": "counter_sent",
         "buyer_draft": buyer_msg,
+        "last_counter_cif_usd": target_price,
     }
 
 
 def counter_supplier_node(state: DealState) -> dict:
-    """Node 4C: Deal Non-Viable or Tactical Margin Concession — Draft counter-bid to supplier."""
     fob_ceiling = state.get("dynamic_fob_ceiling", 945.0)
     campaign: Campaign = state["campaign"]
     supplier = state.get("supplier_terms")
@@ -457,6 +612,11 @@ def counter_supplier_node(state: DealState) -> dict:
 
     supplier_msg = generate_dynamic_llm_draft(supp_prompt, fallback_sub, fallback_body)
 
+    logger.info(
+        f"[WORKFLOW:Node 4C Counter Supplier] Round {curr_round}: Action='{action}', "
+        f"countering supplier with target FOB ceiling USD {target_ceiling:.2f}/MT"
+    )
+
     return {
         "deal_status": "counter_sent",
         "supplier_draft": supplier_msg,
@@ -464,7 +624,6 @@ def counter_supplier_node(state: DealState) -> dict:
 
 
 def reject_deal_node(state: DealState) -> dict:
-    """Node 4D: Hard Limit Rejection — Trade yields less than hard profit hurdle."""
     campaign: Campaign = state["campaign"]
     reason = state.get("evaluation_reason", "Spread does not satisfy minimum hard hurdle.")
     active_role = state.get("active_role", "buyer")
@@ -495,6 +654,11 @@ def reject_deal_node(state: DealState) -> dict:
 
     decline_msg = generate_dynamic_llm_draft(rej_prompt, fallback_sub, fallback_body)
 
+    logger.warning(
+        f"[WORKFLOW:Node 4D Reject] Deal rejected hard for role='{active_role}': "
+        f"action='REJECT_HARD', reason='{reason}'"
+    )
+
     updates = {
         "deal_status": "rejected",
         "is_deal_viable": False,
@@ -508,32 +672,23 @@ def reject_deal_node(state: DealState) -> dict:
     return updates
 
 
-# ---------------------------------------------------------------------------
-# Routing Logic
-# ---------------------------------------------------------------------------
-
 def route_after_evaluation(state: DealState) -> Literal["confirm_deal", "counter_buyer", "counter_supplier", "reject_deal"]:
-    """Conditional router determining the next negotiation action."""
     action = state.get("action")
     has_supplier = state.get("supplier_terms") is not None
     active_role = state.get("active_role", "buyer")
 
-    # Hard Limit Check
     if action == "REJECT_HARD":
         return "reject_deal"
 
-    # Optimal or Final Accept
     if action == "ACCEPT_AND_CLOSE" and has_supplier:
         return "confirm_deal"
 
-    # Concession Counter
     if action == "COUNTER_TO_MAXIMIZE":
         if active_role == "buyer":
             return "counter_buyer"
         else:
             return "counter_supplier"
 
-    # Invariant fallback: Missing supplier allocation
     if state.get("is_deal_viable") and has_supplier:
         return "confirm_deal"
 
@@ -543,14 +698,27 @@ def route_after_evaluation(state: DealState) -> Literal["confirm_deal", "counter
         return "counter_supplier"
 
 
-# ---------------------------------------------------------------------------
-# LangGraph Assembly
-# ---------------------------------------------------------------------------
+def route_entry_point(state: DealState) -> Literal["proactive_outreach", "parse_incoming_email", "__end__"]:
+    latest_email = (state.get("latest_email") or "").strip()
+    if latest_email:
+        return "parse_incoming_email"
 
-def build_arbitrage_graph():
-    """Construct and compile the LangGraph StateGraph."""
+    if state.get("pipeline_step", 0) >= 1 or state.get("deal_status") in ["prospecting", "counter_sent", "approved", "closed", "rejected"]:
+        camp = state.get("campaign")
+        cid = getattr(camp, "campaign_id", None) or (camp.get("campaign_id") if isinstance(camp, dict) else "unknown")
+        logger.info(
+            f"[WORKFLOW:Router] Campaign '{cid}' is waiting for counterparty reply (status: '{state.get('deal_status')}'). "
+            f"No inbound email present; halting at END without duplicate outreach."
+        )
+        return END
+
+    return "proactive_outreach"
+
+
+def build_trade_graph():
     builder = StateGraph(DealState)
 
+    builder.add_node("proactive_outreach", proactive_outreach_node)
     builder.add_node("parse_incoming_email", parse_incoming_email_node)
     builder.add_node("fetch_market_data", fetch_market_data_node)
     builder.add_node("evaluate_risk", evaluate_risk_node)
@@ -559,7 +727,17 @@ def build_arbitrage_graph():
     builder.add_node("counter_supplier", counter_supplier_node)
     builder.add_node("reject_deal", reject_deal_node)
 
-    builder.set_entry_point("parse_incoming_email")
+    builder.set_conditional_entry_point(
+        route_entry_point,
+        {
+            "proactive_outreach": "proactive_outreach",
+            "parse_incoming_email": "parse_incoming_email",
+            END: END,
+        },
+    )
+
+    builder.add_edge("proactive_outreach", END)
+
     builder.add_edge("parse_incoming_email", "fetch_market_data")
     builder.add_edge("fetch_market_data", "evaluate_risk")
 
@@ -582,15 +760,11 @@ def build_arbitrage_graph():
     return builder.compile()
 
 
-# Singleton compiled graph instance
-trade_graph = build_arbitrage_graph()
+build_arbitrage_graph = build_trade_graph
+trade_graph = build_trade_graph()
 
 
 def run_full_autonomous_campaign(campaign_id: str):
-    """
-    Autonomous Multi-Turn Runner delegating to app.main's ledger runner.
-    Allows importing run_full_autonomous_campaign directly from app.workflow.
-    """
     from app.main import run_full_autonomous_campaign as _runner
     return _runner(campaign_id)
 

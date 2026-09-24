@@ -1,6 +1,3 @@
-"""
-Marketplace counterparty directory containing verified buyers and suppliers.
-"""
 from typing import Optional
 from app.models import Counterparty
 
@@ -72,12 +69,10 @@ SUPPLIERS = [
 
 
 def get_all_counterparties() -> dict[str, list[Counterparty]]:
-    """Return all registered counterparties."""
     return {"buyers": BUYERS, "suppliers": SUPPLIERS}
 
 
 def get_buyers_for_commodity(commodity: str) -> list[Counterparty]:
-    """Find buyers whose preferred commodities match the given query."""
     query = commodity.lower().strip()
     matches = [
         b for b in BUYERS
@@ -87,7 +82,6 @@ def get_buyers_for_commodity(commodity: str) -> list[Counterparty]:
 
 
 def get_suppliers_for_commodity(commodity: str) -> list[Counterparty]:
-    """Find suppliers whose product catalog matches the given query."""
     query = commodity.lower().strip()
     matches = [
         s for s in SUPPLIERS
@@ -97,7 +91,6 @@ def get_suppliers_for_commodity(commodity: str) -> list[Counterparty]:
 
 
 def get_counterparty_by_id(cp_id: str) -> Optional[Counterparty]:
-    """Look up a counterparty by their unique ID."""
     for cp in BUYERS + SUPPLIERS:
         if cp.id == cp_id:
             return cp

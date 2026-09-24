@@ -1,6 +1,3 @@
-"""
-Domain data models and schemas for the commodity arbitrage system.
-"""
 from typing import Literal, Optional, TypedDict
 from pydantic import BaseModel, Field
 
@@ -8,7 +5,6 @@ from app.config import settings
 
 
 class Campaign(BaseModel):
-    """Configuration parameters for a back-to-back commodity arbitrage campaign."""
     campaign_id: str = Field(..., description="Unique campaign ID (e.g. CAMP-001)")
     commodity: str = Field(default_factory=lambda: settings.default_commodity, description="Commodity variety")
     target_volume_mt: float = Field(default_factory=lambda: settings.default_target_volume_mt, gt=0, description="Target volume in Metric Tons")
@@ -24,7 +20,6 @@ class Campaign(BaseModel):
 
 
 class ParsedEmail(BaseModel):
-    """Structured commercial terms extracted from incoming trade correspondence."""
     sender_role: str = Field(..., description="'buyer' or 'supplier'")
     commodity: str = Field(default="Basmati 1121")
     quantity_mt: float = Field(default=500.0, gt=0)
@@ -32,13 +27,15 @@ class ParsedEmail(BaseModel):
     incoterm: str = Field(default="CIF", description="'FOB' or 'CIF'")
     port: Optional[str] = Field(default=None, description="Port cited in the quote")
     payment_terms: Optional[str] = Field(default="LC", description="e.g., 'LC at sight', 'CAD'")
+    intent: Optional[str] = Field(default="COUNTER_OFFER", description="'ACCEPTANCE', 'COUNTER_OFFER', 'REJECTION', 'INQUIRY'")
+    is_acceptance: bool = Field(default=False, description="Whether sender accepts desk terms")
+    summary: Optional[str] = Field(default=None, description="Semantic summary of message intent")
 
 
 class Counterparty(BaseModel):
-    """Buyer or supplier listed in the marketplace directory."""
     id: str
     name: str
-    role: str  # 'buyer' or 'supplier'
+    role: str
     country: str
     primary_port: str
     preferred_commodities: list[str]
@@ -47,7 +44,6 @@ class Counterparty(BaseModel):
 
 
 class DealState(TypedDict, total=False):
-    """Complete LangGraph state dictionary shared across workflow nodes."""
     campaign: Campaign
     benchmark_fob_usd: float
     freight_cost_usd: float
@@ -58,21 +54,33 @@ class DealState(TypedDict, total=False):
     buyer_terms: Optional[ParsedEmail]
     supplier_terms: Optional[ParsedEmail]
     negotiation_round: int
-    deal_status: str  # 'prospecting', 'counter_sent', 'approved', 'closed', 'rejected'
+    deal_status: str
     action: Optional[Literal["REJECT_HARD", "COUNTER_TO_MAXIMIZE", "ACCEPT_AND_CLOSE"]]
-    pipeline_step: int  # 1 to 4
+    pipeline_step: int
     is_deal_viable: bool
     net_spread_usd: float
     net_margin_pct: float
     evaluation_reason: str
     latest_email: str
-    active_role: str  # 'buyer' or 'supplier'
+    active_role: str
     buyer_draft: str
     supplier_draft: str
     audit_transcript: list[dict]
+    thread_subject: Optional[str]
+    last_buyer_message_id: Optional[str]
+    buyer_references: Optional[str]
+    last_supplier_message_id: Optional[str]
+    supplier_references: Optional[str]
+    last_counter_cif_usd: Optional[float]
+    buyer_accepted: Optional[bool]
+    target_buyer_name: Optional[str]
+    target_buyer_email: Optional[str]
+    discovered_buyers: Optional[list[dict]]
+    discovered_suppliers: Optional[list[dict]]
+    trigger: Optional[str]
+    skip_email_dispatch: Optional[bool]
 
 
-# API Request/Response Models
 class CreateCampaignRequest(BaseModel):
     commodity: str = Field(default_factory=lambda: settings.default_commodity)
     target_volume_mt: float = Field(default_factory=lambda: settings.default_target_volume_mt)
@@ -87,5 +95,5 @@ class CreateCampaignRequest(BaseModel):
 
 class SimulateTurnRequest(BaseModel):
     campaign_id: str
-    sender_role: str  # 'buyer' or 'supplier'
+    sender_role: str
     raw_email: str
