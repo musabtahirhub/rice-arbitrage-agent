@@ -80,7 +80,8 @@ def run_live_email_negotiation(recipient_email: str | None = None):
         "target_buyer_email": target_email,
         "target_buyer_name": "Institutional Procurement Partner",
     }
-    state = trade_graph.invoke(initial_state)
+    config = {"configurable": {"thread_id": cid}}
+    state = trade_graph.invoke(initial_state, config=config)
 
     if state.get("supplier_terms") is None:
         state["supplier_terms"] = ParsedEmail(
@@ -143,7 +144,7 @@ def run_live_email_negotiation(recipient_email: str | None = None):
             state["active_role"] = "buyer"
 
             print("[LANGGRAPH] Evaluating math engine and invoking Gemini drafting node...")
-            state = trade_graph.invoke(state)
+            state = trade_graph.invoke(state, config=config)
 
             round_num = state.get("negotiation_round", 1)
             action = state.get("action")

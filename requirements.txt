@@ -8,3 +8,7 @@ httpx
 beautifulsoup4>=4.12.0
 fastapi>=0.110.0
 uvicorn>=0.28.0
+psycopg[binary,pool]>=3.1
+langgraph-checkpoint-postgres
+sqlalchemy>=2.0
+alembic

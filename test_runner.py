@@ -1,4 +1,45 @@
 import sys
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
+from langgraph.checkpoint.memory import MemorySaver
+
+import app.database
+import app.main
+import app.workflow
+from app.db_models import Base, CampaignModel, TradeAuditModel
+
+# Setup isolated test database and test checkpointer
+test_engine = create_engine(
+    "sqlite:///:memory:",
+    connect_args={"check_same_thread": False},
+    poolclass=StaticPool,
+)
+TestSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=test_engine)
+Base.metadata.create_all(bind=test_engine)
+
+app.database.engine = test_engine
+app.database.SessionLocal = TestSessionLocal
+app.main.SessionLocal = TestSessionLocal
+
+
+def _override_get_db():
+    db = TestSessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+app.main.app.dependency_overrides[app.database.get_db] = _override_get_db
+
+test_checkpointer = MemorySaver()
+test_checkpointer.setup = lambda: None
+app.workflow.checkpointer = test_checkpointer
+app.workflow.trade_graph = app.workflow.build_trade_graph(checkpointer=test_checkpointer)
+app.main.trade_graph = app.workflow.trade_graph
+trade_graph = app.workflow.trade_graph
+
 from app.models import Campaign, DealState, ParsedEmail
 from app.directory import get_buyers_for_commodity, get_suppliers_for_commodity
 from app.market import get_benchmark_rate, estimate_freight
@@ -10,7 +51,6 @@ from app.math_engine import (
     evaluate_deal_strategy,
     normalize_terms,
 )
-from app.workflow import trade_graph
 
 PASS_COUNT = 0
 FAIL_COUNT = 0
@@ -204,10 +244,11 @@ def test_langgraph_workflow():
         "supplier_terms": None,
     }
 
+    cfg = {"configurable": {"thread_id": campaign.campaign_id}}
     print("  [Step 1] Ingesting low buyer inquiry...")
     state["latest_email"] = "We offer USD 950.00 per MT CIF Jebel Ali for 500 MT Basmati 1121."
     state["active_role"] = "buyer"
-    state = trade_graph.invoke(state)
+    state = trade_graph.invoke(state, config=cfg)
 
     assert_true(state["buyer_terms"] is not None, "Buyer terms extracted")
     assert_true(state["negotiation_round"] == 1, "Negotiation round = 1")
@@ -218,7 +259,7 @@ def test_langgraph_workflow():
     print("  [Step 2] Ingesting competitive supplier quote...")
     state["latest_email"] = "We quote 500 MT Basmati 1121 at USD 900.00/MT FOB Karachi. LC payment."
     state["active_role"] = "supplier"
-    state = trade_graph.invoke(state)
+    state = trade_graph.invoke(state, config=cfg)
 
     assert_true(state["supplier_terms"] is not None, "Supplier terms extracted")
     assert_true(state["negotiation_round"] == 2, "Negotiation round = 2")
@@ -227,7 +268,7 @@ def test_langgraph_workflow():
     print("  [Step 3] Buyer increases bid to USD 1150.00 CIF Jebel Ali...")
     state["latest_email"] = "We agree to increase our bid to USD 1150.00/MT CIF Jebel Ali for 500 MT."
     state["active_role"] = "buyer"
-    state = trade_graph.invoke(state)
+    state = trade_graph.invoke(state, config=cfg)
 
     assert_true(state["negotiation_round"] == 3, "Negotiation round = 3")
     assert_true(state["is_deal_viable"], "Deal is now viable!")
@@ -385,7 +426,8 @@ def test_proactive_origination_and_tactical_maximization():
         "latest_email": "We bid USD 995.00/MT CIF Jebel Ali for 500 MT Basmati 1121.",
         "active_role": "buyer",
     }
-    state_hard = trade_graph.invoke(state_hard)
+    cfg_hard = {"configurable": {"thread_id": campaign.campaign_id}}
+    state_hard = trade_graph.invoke(state_hard, config=cfg_hard)
     assert_true(state_hard["action"] == "REJECT_HARD", "LangGraph sets action to REJECT_HARD")
     assert_true(state_hard["deal_status"] == "rejected", "LangGraph routes to reject_deal node")
     assert_true(not state_hard["is_deal_viable"], "Deal marked non-viable on hard rejection")
@@ -671,7 +713,7 @@ Please provide earliest shipping readiness for 500 MT."""
     assert_true(sent_res is True, "send_email executes with threading headers without exception in mock/live mode")
 
     from app.email_service import EmailReply
-    from app.main import _match_email_to_campaign, CAMPAIGN_LEDGER
+    from app.main import _match_email_to_campaign
 
     reply_mock = EmailReply(
         body="We counter at USD 1020/MT CIF Jebel Ali for 500 MT Basmati 1121.",
@@ -688,16 +730,29 @@ Please provide earliest shipping readiness for 500 MT."""
     assert_true(reply_mock.in_reply_to == "<root-001@desk.com>", "EmailReply provides in_reply_to metadata")
 
     test_cid = "CAMP-MATCH-001"
-    CAMPAIGN_LEDGER[test_cid] = {
-        "campaign": campaign,
-        "deal_status": "prospecting",
-        "audit_transcript": [{
-            "turn": 0,
-            "sender": "Trading Desk",
-            "recipient": "buyer@gulffood.ae",
-            "message": "SCO",
-        }],
-    }
+    with TestSessionLocal() as db:
+        existing = db.query(CampaignModel).filter(CampaignModel.id == test_cid).first()
+        if not existing:
+            db_c = CampaignModel(
+                id=test_cid,
+                commodity=campaign.commodity,
+                target_volume_mt=campaign.target_volume_mt,
+                destination_port=campaign.destination_port,
+                origin_port_default=campaign.origin_port_default,
+                deal_status="prospecting",
+            )
+            db.add(db_c)
+            db.add(TradeAuditModel(
+                campaign_id=test_cid,
+                thread_id=test_cid,
+                role="agent",
+                counterparty_price=None,
+                net_spread=None,
+                raw_message="SCO to buyer@gulffood.ae",
+                direction="OUTBOUND",
+            ))
+            db.commit()
+
     matched = _match_email_to_campaign(reply_mock.subject, str(reply_mock), reply_mock.sender)
     assert_true(matched == test_cid, f"_match_email_to_campaign matched incoming email to active campaign: {matched}")
 

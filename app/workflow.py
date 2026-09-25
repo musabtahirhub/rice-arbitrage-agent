@@ -2,9 +2,11 @@ import email.utils
 import json
 import re
 from typing import Literal, Optional
+from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.graph import StateGraph, END
 
 from app.config import settings
+from app.database import pool
 from app.directory import get_buyers_for_commodity, get_suppliers_for_commodity
 from app.email_service import send_email
 from app.logger import get_logger
@@ -715,7 +717,22 @@ def route_entry_point(state: DealState) -> Literal["proactive_outreach", "parse_
     return "proactive_outreach"
 
 
-def build_trade_graph():
+checkpointer = PostgresSaver(pool)
+
+
+def setup_checkpointer():
+    """Startup setup step calling checkpointer.setup() to initialize checkpoint tables."""
+    try:
+        if hasattr(pool, "closed") and pool.closed:
+            pool.open()
+        if hasattr(checkpointer, "setup"):
+            checkpointer.setup()
+            logger.info("[CHECKPOINTER] Postgres checkpointer tables initialized/verified.")
+    except Exception as exc:
+        logger.warning(f"[CHECKPOINTER] Checkpointer setup notice or error: {exc}")
+
+
+def build_trade_graph(checkpointer=checkpointer):
     builder = StateGraph(DealState)
 
     builder.add_node("proactive_outreach", proactive_outreach_node)
@@ -757,11 +774,13 @@ def build_trade_graph():
     builder.add_edge("counter_supplier", END)
     builder.add_edge("reject_deal", END)
 
+    if checkpointer is not None:
+        return builder.compile(checkpointer=checkpointer)
     return builder.compile()
 
 
 build_arbitrage_graph = build_trade_graph
-trade_graph = build_trade_graph()
+trade_graph = build_trade_graph(checkpointer=checkpointer)
 
 
 def run_full_autonomous_campaign(campaign_id: str):

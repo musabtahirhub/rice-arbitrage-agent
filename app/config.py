@@ -27,6 +27,10 @@ class Settings(BaseSettings):
         default=["*"],
         validation_alias=AliasChoices("CORS_ORIGINS", "ALLOWED_ORIGINS"),
     )
+    database_url: str = Field(
+        default="postgresql://postgres:postgres@localhost:5432/arbitrage_desk",
+        validation_alias=AliasChoices("DATABASE_URL", "POSTGRES_URL", "DB_URL"),
+    )
 
     market_source_url: str = Field(
         default="https://query1.finance.yahoo.com/v8/finance/chart/ZR=F?interval=1d&range=5d",
