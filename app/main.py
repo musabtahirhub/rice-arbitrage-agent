@@ -1,6 +1,8 @@
 import asyncio
+import base64
 from contextlib import asynccontextmanager
 import email.utils
+import json
 import logging
 import os
 from pathlib import Path
@@ -8,7 +10,7 @@ import re
 import threading
 from typing import Optional
 import uuid
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -21,9 +23,15 @@ from app.directory import get_all_counterparties, get_buyers_for_commodity, get_
 from app.email_service import (
     check_latest_reply,
     initialize_unseen_snapshot,
+    is_automated_or_bounce_message,
     normalize_thread_subject,
     parse_email_draft,
     send_email,
+)
+from app.gmail_client import (
+    fetch_latest_messages_by_history,
+    send_gmail_reply,
+    setup_gmail_watch,
 )
 from app.market import get_benchmark_rate, estimate_freight
 from app.math_engine import calculate_dynamic_bounds
@@ -33,6 +41,9 @@ from app.workflow import generate_proactive_sco_draft, setup_checkpointer, split
 from app.logger import setup_logger
 
 logger = setup_logger("arbitrage_desk")
+
+LAST_SEEN_HISTORY_ID: Optional[str] = None
+GMAIL_EVENT_LOCK = asyncio.Lock()
 
 
 def _match_email_to_campaign(subject: str, body: str, sender: str, db: Optional[Session] = None) -> Optional[str]:
@@ -362,18 +373,344 @@ async def email_polling_worker():
         await asyncio.sleep(poll_interval)
 
 
+async def process_incoming_gmail_event(history_id: str):
+    """
+    Background worker to process incoming Gmail Pub/Sub events:
+    a) Retrieve newly added messages via fetch_latest_messages_by_history using LAST_SEEN_HISTORY_ID.
+       Falls back to direct inbox message listing if history is empty, expired, or startHistoryId matches.
+    b) Query active campaigns from PostgreSQL (CampaignModel).
+    c) Inject incoming message and headers (last_buyer_message_id, buyer_references, thread_subject) into DealState.
+    d) Invoke LangGraph: trade_graph.invoke(input_state, config={"configurable": {"thread_id": campaign.id}}).
+    e) If an outbound response is drafted, send it via send_gmail_reply(...) and persist an audit row into TradeAuditModel.
+    """
+    async with GMAIL_EVENT_LOCK:
+        global LAST_SEEN_HISTORY_ID
+        start_history_id = LAST_SEEN_HISTORY_ID
+        new_history_id = str(history_id) if history_id else ""
+        logger.info(
+            f"[GMAIL EVENT] Processing incoming Gmail event: new_history_id='{new_history_id}', "
+            f"LAST_SEEN_HISTORY_ID='{start_history_id}'"
+        )
+
+        query_id = start_history_id if (start_history_id and start_history_id != new_history_id) else (new_history_id if not start_history_id else None)
+        try:
+            messages = await asyncio.to_thread(fetch_latest_messages_by_history, query_id or "")
+        except Exception as e:
+            logger.error(f"[GMAIL EVENT ERROR] Failed fetching messages for history_id {history_id}: {e}", exc_info=True)
+            return
+
+        if new_history_id:
+            LAST_SEEN_HISTORY_ID = new_history_id
+
+        if not messages:
+            logger.info(f"[GMAIL EVENT] No new messages returned for history_id='{history_id}'")
+            return
+
+    desk_emails = {
+        e.strip().lower()
+        for e in [settings.email_user, settings.desk_email, "musabtahir2@gmail.com"]
+        if e
+    }
+
+    for msg_data in messages:
+        sender = msg_data.get("From") or msg_data.get("from") or msg_data.get("sender") or ""
+        sender_lower = sender.strip().lower()
+
+        # Step a: Ignore messages sent by the desk's own email
+        if any(desk_e in sender_lower for desk_e in desk_emails):
+            logger.info(f"[GMAIL EVENT] Ignoring message from desk's own email: {sender}")
+            continue
+
+        sub = msg_data.get("Subject") or msg_data.get("subject") or ""
+        if is_automated_or_bounce_message(sender, sub):
+            logger.info(f"[GMAIL EVENT] Ignoring automated/bounce message from {sender} | Subject: '{sub}'")
+            continue
+
+        raw_body = msg_data.get("body") or ""
+        msg_id = msg_data.get("Message-ID") or msg_data.get("message_id") or ""
+        in_reply_to = msg_data.get("In-Reply-To") or msg_data.get("in_reply_to") or ""
+        references = msg_data.get("References") or msg_data.get("references") or ""
+        thread_id = msg_data.get("threadId") or msg_data.get("thread_id") or ""
+
+        logger.info(f"[GMAIL EVENT] Inbound email detected from '{sender}' | Subject: '{sub}' | Message-ID: '{msg_id}'")
+
+        # Step b: Query active campaigns from PostgreSQL (CampaignModel)
+        with SessionLocal() as db:
+            active_campaigns = (
+                db.query(CampaignModel)
+                .filter(~CampaignModel.deal_status.in_(["closed", "rejected"]))
+                .order_by(CampaignModel.created_at.desc())
+                .all()
+            )
+            if not active_campaigns:
+                logger.warning(f"[GMAIL EVENT] No active campaigns found for inbound email. Subject: '{sub}'")
+                continue
+
+            matched_cid = _match_email_to_campaign(sub, raw_body, sender, db=db)
+            db_camp = db.query(CampaignModel).filter(CampaignModel.id == matched_cid).first() if matched_cid else None
+            if not db_camp:
+                logger.warning(f"[GMAIL EVENT] Inbound email detected, but no matching active campaign found in database. Subject: '{sub}'")
+                continue
+
+            if db_camp.deal_status in ["closed", "rejected"]:
+                logger.info(f"[GMAIL EVENT] Campaign {matched_cid} is already {db_camp.deal_status}. Skipping.")
+                continue
+
+            logger.info(f"[GMAIL EVENT] Processing inbound email for campaign: {matched_cid}")
+
+            # Step c: Inject incoming message and headers (last_buyer_message_id, buyer_references, thread_subject) into DealState
+            config = {"configurable": {"thread_id": db_camp.id}}
+            snapshot = trade_graph.get_state(config)
+            state = dict(snapshot.values) if snapshot and snapshot.values else {}
+            if "campaign" not in state:
+                state["campaign"] = Campaign(
+                    campaign_id=db_camp.id,
+                    commodity=db_camp.commodity,
+                    target_volume_mt=db_camp.target_volume_mt,
+                    destination_port=db_camp.destination_port,
+                    origin_port_default=db_camp.origin_port_default,
+                )
+
+            state["latest_email"] = raw_body
+            state["active_role"] = "buyer"
+
+            if msg_id:
+                state["last_buyer_message_id"] = msg_id
+                existing_refs = state.get("buyer_references") or references or ""
+                if msg_id not in existing_refs:
+                    state["buyer_references"] = f"{existing_refs} {msg_id}".strip()
+            elif references and not state.get("buyer_references"):
+                state["buyer_references"] = references
+
+            if not state.get("thread_subject") and sub:
+                clean_sub = re.sub(r"^(?:re|fwd|fw):\s*", "", sub, flags=re.IGNORECASE).strip()
+                state["thread_subject"] = clean_sub
+
+            camp: Campaign = state["campaign"]
+            buyers = get_buyers_for_commodity(camp.commodity)
+            suppliers = get_suppliers_for_commodity(camp.commodity)
+            me_buyers = [b for b in buyers if b.country in ["UAE", "Saudi Arabia", "Qatar", "Kuwait", "Oman", "Bahrain"]]
+            primary_buyer = me_buyers[0] if me_buyers else (buyers[0] if buyers else None)
+            target_supplier = suppliers[0] if suppliers else None
+
+            buyer_name = primary_buyer.name if primary_buyer else "Procurement Partner"
+            buyer_email = settings.my_test_email or (primary_buyer.contact_email if primary_buyer else "procurement@domain.com")
+            supp_name = target_supplier.name if target_supplier else "Supplier Partner"
+            supp_email = target_supplier.contact_email if target_supplier else "export@supplier.com"
+
+            if state.get("supplier_terms") is None:
+                benchmark_fob = state.get("benchmark_fob_usd") or get_benchmark_rate(camp.commodity)
+                logger.info(
+                    f"[SUPPLIER AGENT] Securing allocation for campaign '{matched_cid}': "
+                    f"{camp.target_volume_mt:,.0f} MT {camp.commodity} @ USD {benchmark_fob:.2f}/MT FOB {camp.origin_port_default}"
+                )
+                state["supplier_terms"] = ParsedEmail(
+                    sender_role="supplier",
+                    commodity=camp.commodity,
+                    quantity_mt=camp.target_volume_mt,
+                    price_usd_per_mt=benchmark_fob,
+                    incoterm="FOB",
+                    port=camp.origin_port_default,
+                    payment_terms=settings.default_payment_terms,
+                )
+                supplier_quote_email = (
+                    f"Subject: Quotation — {camp.commodity} FOB {camp.origin_port_default}\n\n"
+                    f"To: Procurement Desk <trading@{settings.desk_name.lower().replace(' ', '')}.com>\n"
+                    f"From: {supp_name} <{supp_email}>\n\n"
+                    f"Dear Procurement Desk,\n\n"
+                    f"In response to your RFQ, we quote {camp.target_volume_mt:,.0f} MT of export grade {camp.commodity} at "
+                    f"USD {benchmark_fob:.2f}/MT FOB {camp.origin_port_default}. Payment terms: {settings.default_payment_terms}. Ready for prompt loading.\n\n"
+                    f"Best regards,\nExport Sales, {supp_name}"
+                )
+                if "audit_transcript" not in state or state["audit_transcript"] is None:
+                    state["audit_transcript"] = []
+                state["audit_transcript"].append({
+                    "turn": state.get("negotiation_round", 0),
+                    "sender": f"{supp_name} <{supp_email}>",
+                    "recipient": f"Trading Desk ({settings.desk_name})",
+                    "role": "supplier",
+                    "action": "INCOMING_SUPPLIER_QUOTE",
+                    "subject": f"Quotation — {camp.commodity} FOB {camp.origin_port_default}",
+                    "message": supplier_quote_email,
+                })
+                supp_audit = TradeAuditModel(
+                    campaign_id=db_camp.id,
+                    thread_id=db_camp.id,
+                    role="supplier",
+                    counterparty_price=benchmark_fob,
+                    net_spread=None,
+                    raw_message=supplier_quote_email,
+                    direction="INBOUND",
+                )
+                db.add(supp_audit)
+
+            # Step d: Invoke LangGraph
+            updated_state = await asyncio.to_thread(
+                trade_graph.invoke,
+                state,
+                config={"configurable": {"thread_id": db_camp.id}},
+            )
+
+            if "audit_transcript" not in updated_state or updated_state["audit_transcript"] is None:
+                updated_state["audit_transcript"] = []
+
+            curr_round = updated_state.get("negotiation_round", 1)
+            updated_state["audit_transcript"].append({
+                "turn": curr_round,
+                "sender": f"{buyer_name} <{sender or buyer_email}>",
+                "recipient": f"Trading Desk ({settings.desk_name})",
+                "role": "buyer",
+                "action": "INCOMING_COUNTER",
+                "subject": sub or f"Re: {camp.commodity} CIF {camp.destination_port}",
+                "message": raw_body,
+            })
+
+            # Inbound audit record
+            buyer_t = updated_state.get("buyer_terms")
+            inbound_price = buyer_t.price_usd_per_mt if buyer_t else None
+            inbound_audit = TradeAuditModel(
+                campaign_id=db_camp.id,
+                thread_id=db_camp.id,
+                role="buyer",
+                counterparty_price=inbound_price,
+                net_spread=updated_state.get("net_spread_usd"),
+                raw_message=raw_body,
+                direction="INBOUND",
+            )
+            db.add(inbound_audit)
+
+            action = updated_state.get("action")
+            deal_status = updated_state.get("deal_status")
+            buyer_msg = updated_state.get("buyer_draft")
+            supp_msg = updated_state.get("supplier_draft")
+
+            if supp_msg and (action in ["ACCEPT_AND_CLOSE", "LOCK_SUPPLIER_ALLOCATION"] or "Volume Lock" in supp_msg or not state.get("supplier_terms")):
+                supp_thread_sub = f"Urgent RFQ — {camp.commodity} FOB {camp.origin_port_default}"
+                await asyncio.to_thread(
+                    send_gmail_reply,
+                    supp_email,
+                    supp_msg,
+                    in_reply_to=updated_state.get("last_supplier_message_id"),
+                    references=updated_state.get("supplier_references"),
+                    thread_subject=supp_thread_sub,
+                    thread_id=thread_id or None,
+                )
+                supp_sub, _ = split_subject_and_body(
+                    supp_msg,
+                    default_subject=f"Urgent RFQ / Volume Lock — {camp.commodity} FOB {camp.origin_port_default}",
+                )
+                updated_state["audit_transcript"].append({
+                    "turn": curr_round,
+                    "sender": f"Trading Desk ({settings.desk_name})",
+                    "recipient": f"{supp_name} <{supp_email}>",
+                    "role": "agent",
+                    "action": "LOCK_SUPPLIER_ALLOCATION" if action == "ACCEPT_AND_CLOSE" else "SUPPLIER_RFQ",
+                    "subject": supp_sub,
+                    "message": supp_msg,
+                })
+                supp_out_audit = TradeAuditModel(
+                    campaign_id=db_camp.id,
+                    thread_id=db_camp.id,
+                    role="agent",
+                    counterparty_price=state.get("supplier_terms").price_usd_per_mt if state.get("supplier_terms") else None,
+                    net_spread=updated_state.get("net_spread_usd"),
+                    raw_message=supp_msg,
+                    direction="OUTBOUND",
+                )
+                db.add(supp_out_audit)
+
+            # Step e: If an outbound response is drafted, send it via send_gmail_reply(...) and persist an audit row into TradeAuditModel
+            if buyer_msg:
+                default_sub = (
+                    f"Soft Corporate Offer (SCO) Acceptance — {camp.commodity}"
+                    if action == "ACCEPT_AND_CLOSE"
+                    else (
+                        f"Commercial Proposal Status — {camp.commodity}"
+                        if action == "REJECT_HARD"
+                        else f"Counter-Offer — {camp.commodity} CIF {camp.destination_port}"
+                    )
+                )
+                buyer_sub, _ = split_subject_and_body(buyer_msg, default_subject=default_sub)
+                thread_sub = updated_state.get("thread_subject") or buyer_sub
+
+                await asyncio.to_thread(
+                    send_gmail_reply,
+                    buyer_email,
+                    buyer_msg,
+                    in_reply_to=updated_state.get("last_buyer_message_id"),
+                    references=updated_state.get("buyer_references"),
+                    thread_subject=thread_sub,
+                    thread_id=thread_id or None,
+                )
+
+                actual_thread_sub = normalize_thread_subject(buyer_sub, thread_sub)
+                logger.info(
+                    f"[GMAIL EVENT] Dispatched buyer response to '{buyer_email}' via Gmail REST API | "
+                    f"Action: {action} | Subject: '{actual_thread_sub}'"
+                )
+
+                updated_state["audit_transcript"].append({
+                    "turn": curr_round,
+                    "sender": f"Trading Desk ({settings.desk_name})",
+                    "recipient": f"{buyer_name} <{buyer_email}>",
+                    "role": "agent",
+                    "action": action or "COUNTER_BUYER",
+                    "subject": actual_thread_sub,
+                    "message": buyer_msg,
+                })
+                buyer_out_audit = TradeAuditModel(
+                    campaign_id=db_camp.id,
+                    thread_id=db_camp.id,
+                    role="agent",
+                    counterparty_price=updated_state.get("anchor_cif_usd"),
+                    net_spread=updated_state.get("net_spread_usd"),
+                    raw_message=buyer_msg,
+                    direction="OUTBOUND",
+                )
+                db.add(buyer_out_audit)
+
+            db_camp.deal_status = deal_status or db_camp.deal_status
+            db.commit()
+            logger.info(f"[GMAIL EVENT] Campaign {matched_cid} updated to status: {deal_status} (action: {action})")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info(f"[LIFESPAN] Starting {settings.desk_name} Arbitrage Desk v2.0.0...")
+    # 1. DB & Checkpointer init
     init_db()
     setup_checkpointer()
     worker_task = None
-    if settings.email_user and settings.email_pass:
-        logger.info(f"[LIFESPAN] Email credentials configured ({settings.email_user}). Starting background email polling worker...")
-        worker_task = asyncio.create_task(email_polling_worker())
+
+    # 2. Setup Push Webhook Watch or Polling Worker
+    if settings.use_push_webhooks:
+        topic = settings.google_pubsub_topic
+        if topic:
+            logger.info(f"[LIFESPAN] Registering Gmail watch for topic: {topic}")
+            try:
+                watch_result = await asyncio.to_thread(setup_gmail_watch, topic)
+                if watch_result:
+                    global LAST_SEEN_HISTORY_ID
+                    if "historyId" in watch_result:
+                        LAST_SEEN_HISTORY_ID = str(watch_result["historyId"])
+                    logger.info(
+                        f"[LIFESPAN] Gmail watch active! Expiration: {watch_result.get('expiration')}, "
+                        f"initial historyId: {LAST_SEEN_HISTORY_ID}"
+                    )
+                else:
+                    logger.error("[LIFESPAN ERROR] Failed to register Gmail watch.")
+            except Exception as e:
+                logger.error(f"[LIFESPAN] Failed to set up Gmail watch on boot: {e}")
+        else:
+            logger.info("[LIFESPAN] Push webhooks enabled (USE_PUSH_WEBHOOKS=True). Polling worker disabled.")
     else:
-        logger.warning("[LIFESPAN] Email credentials not configured (EMAIL_USER/EMAIL_PASS). Live email polling worker disabled.")
+        if settings.email_user and settings.email_pass:
+            logger.info(f"[LIFESPAN] Email credentials configured ({settings.email_user}). Starting background email polling worker...")
+            worker_task = asyncio.create_task(email_polling_worker())
+        else:
+            logger.warning("[LIFESPAN] Email credentials not configured (EMAIL_USER/EMAIL_PASS). Live email polling worker disabled.")
+
     yield
+
     if worker_task:
         logger.info("[LIFESPAN] Stopping background email polling worker...")
         worker_task.cancel()
@@ -403,6 +740,49 @@ app.add_middleware(
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 if not STATIC_DIR.exists():
     STATIC_DIR = Path(__file__).resolve().parent / "static"
+
+
+@app.post("/api/webhooks/gmail")
+async def gmail_webhook_endpoint(request: Request, background_tasks: BackgroundTasks):
+    """
+    Real-time Google Cloud Pub/Sub push notification endpoint for Gmail watch.
+    Reads JSON payload: {"message": {"data": "<base64_encoded>"}}, acknowledges Pub/Sub with 200 immediately,
+    and offloads processing to process_incoming_gmail_event(history_id).
+    """
+    try:
+        body = await request.json()
+    except Exception as e:
+        logger.error(f"[GMAIL WEBHOOK] Invalid JSON received: {e}")
+        return {"status": "error", "message": "Invalid JSON"}
+
+    message = body.get("message") if isinstance(body, dict) else {}
+    if not isinstance(message, dict):
+        message = {}
+
+    data_b64 = message.get("data", "")
+    history_id = ""
+
+    if data_b64:
+        try:
+            missing_padding = len(data_b64) % 4
+            if missing_padding:
+                data_b64 += "=" * (4 - missing_padding)
+            decoded_bytes = base64.b64decode(data_b64)
+            decoded_str = decoded_bytes.decode("utf-8")
+            try:
+                data_json = json.loads(decoded_str)
+                history_id = str(data_json.get("historyId", ""))
+            except Exception:
+                history_id = decoded_str.strip()
+        except Exception as e:
+            logger.error(f"[GMAIL WEBHOOK] Error decoding Pub/Sub data: {e}")
+
+    logger.info(f"[GMAIL WEBHOOK] Received Pub/Sub webhook notification. historyId: '{history_id}'")
+
+    if history_id:
+        background_tasks.add_task(process_incoming_gmail_event, history_id)
+
+    return {"status": "ok", "historyId": history_id}
 
 
 @app.get("/api/directory")

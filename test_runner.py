@@ -559,13 +559,26 @@ def test_autonomous_end_to_end_campaign():
         "min_profit_per_mt_hard": 40.0,
         "min_profit_per_mt_soft": 100.0,
         "max_negotiation_rounds": 3,
+        "auto_run": True,
     }
     res_thai = client.post("/api/campaigns", json=payload_thai)
-    assert_true(res_thai.status_code == 200, "POST /api/campaigns with default auto_run=True for Thai White returns 200")
+    assert_true(res_thai.status_code == 200, "POST /api/campaigns with auto_run=True for Thai White returns 200")
     thai_data = res_thai.json()
     assert_true(thai_data.get("deal_status") == "closed", "Thai White autonomous campaign closed")
     assert_true(thai_data.get("final_net_spread_usd") >= 40.0, f"Thai White final spread >= $40/MT (got ${thai_data.get('final_net_spread_usd')}/MT)")
     assert_true(len(thai_data.get("audit_transcript", [])) >= 4, "Thai White transcript recorded")
+
+    # Verify default auto_run=False leaves campaign open in prospecting state
+    payload_manual = {
+        "commodity": "Basmati 1121",
+        "target_volume_mt": 500.0,
+        "destination_port": "Jebel Ali",
+    }
+    res_manual = client.post("/api/campaigns", json=payload_manual)
+    assert_true(res_manual.status_code == 200, "POST /api/campaigns with default auto_run=False returns 200")
+    manual_data = res_manual.json()
+    assert_true(manual_data.get("deal_status") == "prospecting", f"Manual campaign deal_status is prospecting (got {manual_data.get('deal_status')})")
+    assert_true(manual_data.get("status") == "initialized", "Manual campaign status is initialized")
 
 
 def test_dynamic_llm_email_generation_and_transport():

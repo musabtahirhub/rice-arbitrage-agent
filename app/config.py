@@ -21,6 +21,23 @@ class Settings(BaseSettings):
     email_pass: str = Field(default="", validation_alias=AliasChoices("EMAIL_PASS", "GMAIL_PASS", "SMTP_PASS", "EMAIL_PASSWORD"))
     my_test_email: str = Field(default="", validation_alias=AliasChoices("MY_TEST_EMAIL", "TEST_BUYER_EMAIL", "RECIPIENT_EMAIL"))
 
+    google_pubsub_topic: str = Field(
+        default="",
+        validation_alias=AliasChoices("GOOGLE_PUBSUB_TOPIC", "PUBSUB_TOPIC"),
+    )
+    google_credentials_json_path: str = Field(
+        default="credentials.json",
+        validation_alias=AliasChoices("GOOGLE_CREDENTIALS_JSON_PATH", "CREDENTIALS_JSON_PATH"),
+    )
+    google_token_json_path: str = Field(
+        default="token.json",
+        validation_alias=AliasChoices("GOOGLE_TOKEN_JSON_PATH", "TOKEN_JSON_PATH"),
+    )
+    use_push_webhooks: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("USE_PUSH_WEBHOOKS", "ENABLE_PUSH_WEBHOOKS"),
+    )
+
     port: int = Field(default=8000, validation_alias=AliasChoices("PORT", "DEFAULT_APP_PORT", "SERVER_PORT"))
     host: str = Field(default="127.0.0.1", validation_alias=AliasChoices("HOST", "SERVER_HOST"))
     cors_origins: Union[list[str], str] = Field(
@@ -103,9 +120,15 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("DESK_NAME", "TRADING_DESK_NAME"),
     )
     desk_email: str = Field(
-        default="trading@arbitrage-desk.com",
+        default="musabtahir2@gmail.com",
         validation_alias=AliasChoices("DESK_EMAIL", "TRADING_DESK_EMAIL"),
     )
+    def __getattr__(self, name: str):
+        lower_name = name.lower()
+        try:
+            return object.__getattribute__(self, lower_name)
+        except AttributeError:
+            raise AttributeError(f"{type(self).__name__!r} object has no attribute {name!r}")
 
 
 settings = Settings()

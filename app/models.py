@@ -90,7 +90,7 @@ class CreateCampaignRequest(BaseModel):
     min_profit_per_mt_hard: float = Field(default=50.0)
     min_profit_per_mt_soft: float = Field(default=120.0)
     max_negotiation_rounds: int = Field(default=3)
-    auto_run: bool = Field(default=True, description="Whether to run the entire negotiation lifecycle end-to-end automatically")
+    auto_run: bool = Field(default=False, description="Whether to run the entire negotiation lifecycle end-to-end automatically")
 
 
 class SimulateTurnRequest(BaseModel):

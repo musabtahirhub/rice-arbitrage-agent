@@ -27,3 +27,6 @@ ENV/
 .cache/
 market_cache.json
 documentation.md
+
+credentials.json
+token.json
