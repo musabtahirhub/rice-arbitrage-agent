@@ -3,6 +3,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.types import Command
 
 import app.database
 import app.main
@@ -272,6 +273,13 @@ def test_langgraph_workflow():
 
     assert_true(state["negotiation_round"] == 3, "Negotiation round = 3")
     assert_true(state["is_deal_viable"], "Deal is now viable!")
+
+    # Governance gate: verify graph paused at approval_gate on ACCEPT_AND_CLOSE
+    snapshot = trade_graph.get_state(cfg)
+    assert_true(snapshot.next == ("approval_gate",), "Graph pauses at approval_gate on ACCEPT_AND_CLOSE")
+
+    # Resume with approved=True
+    state = trade_graph.invoke(Command(resume={"approved": True, "reviewer_notes": "Terms acceptable"}), config=cfg)
     assert_true(state["deal_status"] == "closed", "Deal closed formally")
     supp_draft_lower = state["supplier_draft"].lower()
     buyer_draft_lower = state["buyer_draft"].lower()
@@ -344,8 +352,16 @@ def test_fastapi_endpoints():
     assert_true(res.status_code == 200, "POST /api/negotiate Turn 3 returns 200")
     t3_data = res.json()
     assert_true(t3_data["is_deal_viable"], "Turn 3: Deal is fully viable")
-    assert_true(t3_data["deal_status"] == "closed", "Turn 3: Deal status is closed")
-    assert_true(t3_data["net_margin_pct"] >= 10.0, f"Turn 3: Net margin exceeds target ({t3_data['net_margin_pct']}%)")
+    assert_true(t3_data["deal_status"] in ["pending_approval", "closed"], f"Turn 3: Deal status is pending approval (got {t3_data['deal_status']})")
+
+    # Approve via HITL endpoint
+    appr_res = client.post(f"/api/campaigns/{cid}/approve", json={"approved": True, "reviewer_notes": "Terms acceptable"})
+    assert_true(appr_res.status_code == 200, "POST /api/campaigns/{id}/approve returns 200")
+    appr_data = appr_res.json()
+    assert_true(appr_data["deal_status"] == "closed", "Turn 3: Deal status is closed after approval")
+    assert_true(appr_data["deal_approved_by_human"] is True, "deal_approved_by_human is True")
+    assert_true(appr_data["net_margin_pct"] >= 10.0, f"Turn 3: Net margin exceeds target ({appr_data['net_margin_pct']}%)")
+    assert_true("execution_trail" in appr_data, "Execution trail included in response")
 
     res = client.get(f"/api/campaigns/{cid}")
     assert_true(res.status_code == 200, "GET /api/campaigns/{id} returns 200")
@@ -499,6 +515,11 @@ def test_proactive_origination_and_tactical_maximization():
     assert_true(t3_res.status_code == 200, "Turn 3 API call succeeds")
     t3_data = t3_res.json()
     assert_true(t3_data.get("action") == "ACCEPT_AND_CLOSE", f"Turn 3 action is ACCEPT_AND_CLOSE (got {t3_data.get('action')})")
+
+    # Approve via HITL governance endpoint
+    appr_res = client.post(f"/api/campaigns/{cid}/approve", json={"approved": True, "reviewer_notes": "Concession accepted"})
+    assert_true(appr_res.status_code == 200, "Approve endpoint returns 200")
+    t3_data = appr_res.json()
     assert_true(t3_data.get("deal_status") == "closed", "Turn 3 deal status is closed")
     assert_true(t3_data.get("net_spread_usd") == 120.0, f"Turn 3 net spread reaches soft target $120.00/MT (got {t3_data.get('net_spread_usd')})")
 
@@ -770,6 +791,195 @@ Please provide earliest shipping readiness for 500 MT."""
     assert_true(matched == test_cid, f"_match_email_to_campaign matched incoming email to active campaign: {matched}")
 
 
+def test_hitl_governance_gate():
+    print("\n--- 9. Testing Human-in-the-Loop (HITL) Governance Gate ---")
+    from starlette.testclient import TestClient
+    from app.main import app
+
+    client = TestClient(app)
+
+    campaign = Campaign(
+        campaign_id="CAMP-HITL-001",
+        commodity="Basmati 1121",
+        target_volume_mt=500.0,
+        target_margin_pct=10.0,
+        destination_port="Jebel Ali",
+        origin_port_default="Karachi",
+        min_profit_per_mt_hard=50.0,
+        min_profit_per_mt_soft=120.0,
+        max_negotiation_rounds=3,
+    )
+
+    buyer_terms = ParsedEmail(
+        sender_role="buyer",
+        commodity="Basmati 1121",
+        quantity_mt=500.0,
+        price_usd_per_mt=1150.0,
+        incoterm="CIF",
+        port="Jebel Ali",
+    )
+    supplier_terms = ParsedEmail(
+        sender_role="supplier",
+        commodity="Basmati 1121",
+        quantity_mt=500.0,
+        price_usd_per_mt=900.0,
+        incoterm="FOB",
+        port="Karachi",
+    )
+
+    # 1. Verify graph pauses at approval_gate on ACCEPT_AND_CLOSE & Resuming with approved=True
+    t1 = "CAMP-HITL-THREAD-1"
+    cfg1 = {"configurable": {"thread_id": t1}}
+    state1: DealState = {
+        "campaign": campaign,
+        "negotiation_round": 2,
+        "deal_status": "counter_sent",
+        "benchmark_fob_usd": 900.0,
+        "freight_cost_usd": 45.0,
+        "dynamic_fob_ceiling": 945.0,
+        "dynamic_cif_floor": 1050.0,
+        "anchor_cif_usd": 1114.16,
+        "buyer_terms": buyer_terms,
+        "supplier_terms": supplier_terms,
+        "latest_email": "We agree to increase bid to USD 1150.00/MT CIF Jebel Ali for 500 MT.",
+        "active_role": "buyer",
+        "skip_email_dispatch": True,
+    }
+    trade_graph.invoke(state1, config=cfg1)
+    snapshot1 = trade_graph.get_state(cfg1)
+    assert_true(snapshot1.next == ("approval_gate",), "Graph pauses at approval_gate on ACCEPT_AND_CLOSE")
+    assert_true(len(snapshot1.tasks) > 0 and len(snapshot1.tasks[0].interrupts) > 0, "Interrupt triggered at approval_gate")
+
+    # Review payload verification
+    review_payload = snapshot1.tasks[0].interrupts[0].value
+    assert_true(review_payload.get("campaign_id") == "CAMP-HITL-001", "Review payload contains campaign_id")
+    assert_true(review_payload.get("commodity") == "Basmati 1121", "Review payload contains commodity")
+    assert_true(review_payload.get("volume_mt") == 500.0, "Review payload contains volume_mt")
+    assert_true(review_payload.get("buyer_bid_cif") == 1150.0, "Review payload contains buyer_bid_cif")
+    assert_true(review_payload.get("supplier_ask_fob") == 900.0, "Review payload contains supplier_ask_fob")
+    assert_true(review_payload.get("freight_cost_usd") == 45.0, "Review payload contains freight_cost_usd")
+    assert_true(review_payload.get("net_spread_usd") == 185.0, f"Review payload contains net_spread_usd (got {review_payload.get('net_spread_usd')})")
+    assert_true(review_payload.get("net_margin_pct") == 19.17, f"Review payload contains net_margin_pct (got {review_payload.get('net_margin_pct')})")
+    assert_true(review_payload.get("total_deal_value") == 575000.0, f"Review payload contains total_deal_value (got {review_payload.get('total_deal_value')})")
+
+    # Resume with approved=True
+    res1 = trade_graph.invoke(
+        Command(resume={"approved": True, "reviewer_notes": "Spread and margins verified"}),
+        config=cfg1,
+    )
+    assert_true(res1.get("deal_status") == "closed", "Resuming with approved=True executes confirm_deal and marks trade as closed")
+    assert_true(res1.get("deal_approved_by_human") is True, "deal_approved_by_human is True")
+    assert_true(res1.get("reviewer_notes") == "Spread and margins verified", "reviewer_notes preserved in state")
+    assert_true(len(res1.get("buyer_draft", "")) > 0, "confirm_deal drafted buyer SCO acceptance")
+    assert_true(len(res1.get("supplier_draft", "")) > 0, "confirm_deal drafted supplier volume lock")
+
+    # 2. Resuming with approved=False and override_cif_price executes counter_buyer
+    t2 = "CAMP-HITL-THREAD-2"
+    cfg2 = {"configurable": {"thread_id": t2}}
+    state2: DealState = {
+        "campaign": campaign,
+        "negotiation_round": 2,
+        "deal_status": "counter_sent",
+        "benchmark_fob_usd": 900.0,
+        "freight_cost_usd": 45.0,
+        "dynamic_fob_ceiling": 945.0,
+        "dynamic_cif_floor": 1050.0,
+        "anchor_cif_usd": 1114.16,
+        "buyer_terms": buyer_terms,
+        "supplier_terms": supplier_terms,
+        "latest_email": "We agree to increase bid to USD 1150.00/MT CIF Jebel Ali for 500 MT.",
+        "active_role": "buyer",
+        "skip_email_dispatch": True,
+    }
+    trade_graph.invoke(state2, config=cfg2)
+    snapshot2 = trade_graph.get_state(cfg2)
+    assert_true(snapshot2.next == ("approval_gate",), "Thread 2 pauses at approval_gate")
+
+    res2 = trade_graph.invoke(
+        Command(resume={"approved": False, "override_cif_price": 1195.0, "reviewer_notes": "Demand floor override"}),
+        config=cfg2,
+    )
+    assert_true(res2.get("deal_status") == "counter_sent", "Resuming with override executes counter_buyer and sets counter_sent")
+    assert_true(res2.get("deal_approved_by_human") is False, "deal_approved_by_human is False")
+    assert_true(res2.get("last_counter_cif_usd") == 1195.0, f"last_counter_cif_usd is $1195.00 (got {res2.get('last_counter_cif_usd')})")
+    assert_true(res2.get("evaluation_reason") == "Demand floor override", "evaluation_reason reflects trader notes")
+    assert_true(len(res2.get("buyer_draft", "")) > 0, "counter_buyer generated counter-offer draft")
+
+    # 3. Resuming with approved=False (hard reject) executes reject_deal
+    t3 = "CAMP-HITL-THREAD-3"
+    cfg3 = {"configurable": {"thread_id": t3}}
+    state3: DealState = {
+        "campaign": campaign,
+        "negotiation_round": 2,
+        "deal_status": "counter_sent",
+        "benchmark_fob_usd": 900.0,
+        "freight_cost_usd": 45.0,
+        "dynamic_fob_ceiling": 945.0,
+        "dynamic_cif_floor": 1050.0,
+        "anchor_cif_usd": 1114.16,
+        "buyer_terms": buyer_terms,
+        "supplier_terms": supplier_terms,
+        "latest_email": "We agree to increase bid to USD 1150.00/MT CIF Jebel Ali for 500 MT.",
+        "active_role": "buyer",
+        "skip_email_dispatch": True,
+    }
+    trade_graph.invoke(state3, config=cfg3)
+    snapshot3 = trade_graph.get_state(cfg3)
+    assert_true(snapshot3.next == ("approval_gate",), "Thread 3 pauses at approval_gate")
+
+    res3 = trade_graph.invoke(
+        Command(resume={"approved": False, "reviewer_notes": "Declined by risk officer: KYC pending"}),
+        config=cfg3,
+    )
+    assert_true(res3.get("deal_status") == "rejected", "Resuming hard reject sets deal_status rejected")
+    assert_true(res3.get("deal_approved_by_human") is False, "deal_approved_by_human is False")
+    assert_true(res3.get("evaluation_reason") == "Declined by risk officer: KYC pending", "evaluation_reason reflects risk officer note")
+    assert_true(len(res3.get("buyer_draft", "")) > 0, "reject_deal generated rejection notice")
+
+    # 4. Testing POST /api/campaigns/{id}/approve endpoint
+    api_cid = "CAMP-API-HITL"
+    with TestSessionLocal() as db:
+        if not db.query(CampaignModel).filter(CampaignModel.id == api_cid).first():
+            db.add(CampaignModel(
+                id=api_cid,
+                commodity="Basmati 1121",
+                target_volume_mt=500.0,
+                destination_port="Jebel Ali",
+                origin_port_default="Karachi",
+                deal_status="pending_approval",
+            ))
+            db.commit()
+
+    api_cfg = {"configurable": {"thread_id": api_cid}}
+    api_init_state: DealState = {
+        "campaign": campaign,
+        "negotiation_round": 2,
+        "deal_status": "counter_sent",
+        "benchmark_fob_usd": 900.0,
+        "freight_cost_usd": 45.0,
+        "dynamic_fob_ceiling": 945.0,
+        "dynamic_cif_floor": 1050.0,
+        "anchor_cif_usd": 1114.16,
+        "buyer_terms": buyer_terms,
+        "supplier_terms": supplier_terms,
+        "latest_email": "We agree to increase bid to USD 1150.00/MT CIF Jebel Ali for 500 MT.",
+        "active_role": "buyer",
+        "skip_email_dispatch": True,
+    }
+    trade_graph.invoke(api_init_state, config=api_cfg)
+
+    appr_resp = client.post(
+        f"/api/campaigns/{api_cid}/approve",
+        json={"approved": True, "reviewer_notes": "Desk head approval granted"},
+    )
+    assert_true(appr_resp.status_code == 200, f"POST /api/campaigns/{api_cid}/approve returns 200 (got {appr_resp.status_code})")
+    appr_data = appr_resp.json()
+    assert_true(appr_data.get("deal_status") == "closed", "API approve response returns deal_status closed")
+    assert_true(appr_data.get("deal_approved_by_human") is True, "API approve response confirms human approval")
+    assert_true(appr_data.get("reviewer_notes") == "Desk head approval granted", "API approve response preserves reviewer notes")
+    assert_true("execution_trail" in appr_data, "API approve returns execution trail")
+
+
 def run_all_tests():
     print("====================================================================")
     print("  Commodity Arbitrage Multi-Agent System — Self-Contained Test Suite")
@@ -783,6 +993,7 @@ def run_all_tests():
     test_proactive_origination_and_tactical_maximization()
     test_autonomous_end_to_end_campaign()
     test_dynamic_llm_email_generation_and_transport()
+    test_hitl_governance_gate()
 
     print("\n====================================================================")
     print(f"  Test Results: {PASS_COUNT} passed, {FAIL_COUNT} failed")

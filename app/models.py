@@ -79,6 +79,15 @@ class DealState(TypedDict, total=False):
     discovered_suppliers: Optional[list[dict]]
     trigger: Optional[str]
     skip_email_dispatch: Optional[bool]
+    deal_approved_by_human: Optional[bool] = None
+    reviewer_notes: Optional[str] = None
+    override_cif_price: Optional[float] = None
+
+
+class ApprovalPayload(BaseModel):
+    approved: bool
+    override_cif_price: Optional[float] = None
+    reviewer_notes: Optional[str] = None
 
 
 class CreateCampaignRequest(BaseModel):
@@ -97,3 +106,4 @@ class SimulateTurnRequest(BaseModel):
     campaign_id: str
     sender_role: str
     raw_email: str
+

@@ -17,9 +17,9 @@ class Settings(BaseSettings):
     smtp_server: str = Field(default="smtp.gmail.com", validation_alias=AliasChoices("SMTP_SERVER", "EMAIL_SMTP_SERVER"))
     smtp_port: int = Field(default=587, validation_alias=AliasChoices("SMTP_PORT", "EMAIL_SMTP_PORT"))
     imap_server: str = Field(default="imap.gmail.com", validation_alias=AliasChoices("IMAP_SERVER", "EMAIL_IMAP_SERVER"))
-    email_user: str = Field(default="", validation_alias=AliasChoices("EMAIL_USER", "GMAIL_USER", "SMTP_USER"))
-    email_pass: str = Field(default="", validation_alias=AliasChoices("EMAIL_PASS", "GMAIL_PASS", "SMTP_PASS", "EMAIL_PASSWORD"))
-    my_test_email: str = Field(default="", validation_alias=AliasChoices("MY_TEST_EMAIL", "TEST_BUYER_EMAIL", "RECIPIENT_EMAIL"))
+    email_user: str = Field(default="", validation_alias=AliasChoices("EMAIL_USER", "GMAIL_USER"))
+    email_pass: str = Field(default="", validation_alias=AliasChoices("EMAIL_PASS", "GMAIL_PASS"))
+    my_test_email: str = Field(default="", validation_alias=AliasChoices("MY_TEST_EMAIL", "TEST_BUYER_EMAIL"))
 
     google_pubsub_topic: str = Field(
         default="",
@@ -38,7 +38,7 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("USE_PUSH_WEBHOOKS", "ENABLE_PUSH_WEBHOOKS"),
     )
 
-    port: int = Field(default=8000, validation_alias=AliasChoices("PORT", "DEFAULT_APP_PORT", "SERVER_PORT"))
+    port: int = Field(default=8000, validation_alias=AliasChoices("PORT", "DEFAULT_APP_PORT"))
     host: str = Field(default="127.0.0.1", validation_alias=AliasChoices("HOST", "SERVER_HOST"))
     cors_origins: Union[list[str], str] = Field(
         default=["*"],
@@ -46,12 +46,12 @@ class Settings(BaseSettings):
     )
     database_url: str = Field(
         default="postgresql://postgres:postgres@localhost:5432/arbitrage_desk",
-        validation_alias=AliasChoices("DATABASE_URL", "POSTGRES_URL", "DB_URL"),
+        validation_alias=AliasChoices("DATABASE_URL", "POSTGRES_URL"),
     )
 
     market_source_url: str = Field(
         default="https://query1.finance.yahoo.com/v8/finance/chart/ZR=F?interval=1d&range=5d",
-        validation_alias=AliasChoices("MARKET_SOURCE_URL", "YAHOO_RICE_URL", "THAI_RICE_URL"),
+        validation_alias=AliasChoices("MARKET_SOURCE_URL", "YAHOO_RICE_URL"),
     )
     market_cache_file: str = Field(
         default="market_cache.json",
