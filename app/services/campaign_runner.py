@@ -5,11 +5,11 @@ from sqlalchemy.orm import Session
 from langgraph.types import Command
 
 from app.config import settings
-from app.database import SessionLocal
+import app.database
 from app.db_models import CampaignModel, TradeAuditModel
 from app.directory import get_buyers_for_commodity, get_suppliers_for_commodity
 from app.models import Campaign
-from app.workflow import trade_graph
+import app.workflow
 from app.logger import setup_logger
 
 logger = setup_logger("arbitrage_desk")
@@ -17,7 +17,7 @@ logger = setup_logger("arbitrage_desk")
 def run_full_autonomous_campaign(campaign_id: str, db: Optional[Session] = None) -> dict:
     should_close = False
     if db is None:
-        db = SessionLocal()
+        db = app.database.SessionLocal()
         should_close = True
 
     try:
@@ -26,7 +26,7 @@ def run_full_autonomous_campaign(campaign_id: str, db: Optional[Session] = None)
             raise HTTPException(status_code=404, detail=f"Campaign {campaign_id} not found.")
 
         config = {"configurable": {"thread_id": campaign_id}}
-        snapshot = trade_graph.get_state(config)
+        snapshot = app.workflow.trade_graph.get_state(config)
         state = dict(snapshot.values) if snapshot and snapshot.values else {}
         if not state:
             raise HTTPException(status_code=404, detail=f"State for campaign {campaign_id} not found.")
@@ -78,7 +78,7 @@ def run_full_autonomous_campaign(campaign_id: str, db: Optional[Session] = None)
 
         state["latest_email"] = buyer_interest_email
         state["active_role"] = "buyer"
-        state = trade_graph.invoke(state, config=config)
+        state = app.workflow.trade_graph.invoke(state, config=config)
 
         state["audit_transcript"].append({
             "turn": 1,
@@ -132,11 +132,11 @@ def run_full_autonomous_campaign(campaign_id: str, db: Optional[Session] = None)
 
         state["latest_email"] = supplier_quote_email
         state["active_role"] = "supplier"
-        state = trade_graph.invoke(state, config=config)
+        state = app.workflow.trade_graph.invoke(state, config=config)
 
-        snapshot = trade_graph.get_state(config)
+        snapshot = app.workflow.trade_graph.get_state(config)
         if snapshot and snapshot.next and "approval_gate" in snapshot.next:
-            state = trade_graph.invoke(
+            state = app.workflow.trade_graph.invoke(
                 Command(resume={"approved": True, "reviewer_notes": "Autonomous campaign auto-approval"}),
                 config=config,
             )
@@ -202,11 +202,11 @@ def run_full_autonomous_campaign(campaign_id: str, db: Optional[Session] = None)
 
                 state["latest_email"] = concession_email
                 state["active_role"] = "buyer"
-                state = trade_graph.invoke(state, config=config)
+                state = app.workflow.trade_graph.invoke(state, config=config)
 
-                snapshot = trade_graph.get_state(config)
+                snapshot = app.workflow.trade_graph.get_state(config)
                 if snapshot and snapshot.next and "approval_gate" in snapshot.next:
-                    state = trade_graph.invoke(
+                    state = app.workflow.trade_graph.invoke(
                         Command(resume={"approved": True, "reviewer_notes": "Autonomous campaign auto-approval"}),
                         config=config,
                     )
@@ -276,7 +276,7 @@ def run_full_autonomous_campaign(campaign_id: str, db: Optional[Session] = None)
         db.commit()
 
         try:
-            trade_graph.update_state(
+            app.workflow.trade_graph.update_state(
                 config,
                 {
                     "audit_transcript": state.get("audit_transcript", []),

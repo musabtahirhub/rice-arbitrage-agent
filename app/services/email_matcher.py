@@ -1,6 +1,6 @@
 from typing import Optional
 from sqlalchemy.orm import Session
-from app.database import SessionLocal
+import app.database
 from app.db_models import CampaignModel, TradeAuditModel
 
 def match_email_to_campaign(subject: str, body: str, sender: str, db: Optional[Session] = None) -> Optional[str]:
@@ -10,7 +10,7 @@ def match_email_to_campaign(subject: str, body: str, sender: str, db: Optional[S
 
     should_close = False
     if db is None:
-        db = SessionLocal()
+        db = app.database.SessionLocal()
         should_close = True
 
     try:
@@ -22,19 +22,15 @@ def match_email_to_campaign(subject: str, body: str, sender: str, db: Optional[S
         )
         if not active_campaigns:
             all_campaigns = db.query(CampaignModel).order_by(CampaignModel.created_at.desc()).all()
-            if not all_campaigns:
-                return None
             for camp in all_campaigns:
                 if camp.id.lower() in sub_low or camp.id.lower() in body_low:
                     return camp.id
-            return all_campaigns[0].id
+            return None
 
-        # 1. Direct match by ID in subject or body
         for camp in active_campaigns:
             if camp.id.lower() in sub_low or camp.id.lower() in body_low:
                 return camp.id
 
-        # 2. Match counterparty email in historical audit entries
         for camp in active_campaigns:
             audits = db.query(TradeAuditModel).filter(TradeAuditModel.campaign_id == camp.id).all()
             for audit in audits:
@@ -45,14 +41,12 @@ def match_email_to_campaign(subject: str, body: str, sender: str, db: Optional[S
                 ):
                     return camp.id
 
-        # 3. Match commodity name
         for camp in active_campaigns:
             comm = camp.commodity.lower()
             if comm in sub_low or comm in body_low or any(w in sub_low for w in comm.split()):
                 return camp.id
 
-        # 4. Fallback to latest active campaign
-        return active_campaigns[0].id
+        return None
     finally:
         if should_close:
             db.close()

@@ -10,7 +10,7 @@ from app.database import get_db
 from app.db_models import CampaignModel, TradeAuditModel
 from app.directory import get_all_counterparties
 from app.models import Campaign, CreateCampaignRequest, DealState
-from app.workflow import trade_graph
+import app.workflow
 from app.services.campaign_runner import run_full_autonomous_campaign
 
 logger = logging.getLogger("arbitrage_desk")
@@ -46,7 +46,6 @@ def create_campaign(req: CreateCampaignRequest, db: Session = Depends(get_db)):
         max_negotiation_rounds=req.max_negotiation_rounds,
     )
 
-    # Persist the new campaign row into CampaignModel via a SQLAlchemy session
     db_campaign = CampaignModel(
         id=campaign_id,
         commodity=req.commodity,
@@ -79,13 +78,11 @@ def create_campaign(req: CreateCampaignRequest, db: Session = Depends(get_db)):
     }
 
     config = {"configurable": {"thread_id": campaign.campaign_id}}
-    launched_state = trade_graph.invoke(initial_state, config=config)
+    launched_state = app.workflow.trade_graph.invoke(initial_state, config=config)
 
-    # Update deal status and anchor_cif_usd
     db_campaign.deal_status = launched_state.get("deal_status", "prospecting")
     db_campaign.anchor_cif_usd = launched_state.get("anchor_cif_usd")
 
-    # Persist initial outbound SCO draft to TradeAuditModel
     if launched_state.get("buyer_draft"):
         sco_audit = TradeAuditModel(
             campaign_id=campaign_id,
@@ -139,7 +136,7 @@ def get_campaign_status(campaign_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail=f"Campaign {campaign_id} not found.")
 
     config = {"configurable": {"thread_id": campaign_id}}
-    snapshot = trade_graph.get_state(config)
+    snapshot = app.workflow.trade_graph.get_state(config)
     state = dict(snapshot.values) if snapshot and snapshot.values else {}
 
     audits = (

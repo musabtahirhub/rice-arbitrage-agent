@@ -7,10 +7,11 @@ from pathlib import Path
 
 from app.config import settings
 from app.database import init_db
-from app.gmail_client import setup_gmail_watch
+from app.gmail_client import fetch_latest_messages_by_history, send_gmail_reply, setup_gmail_watch
 from app.workflow import setup_checkpointer
 from app.services import gmail_worker
 from app.services.gmail_worker import email_polling_worker
+from app.services.email_matcher import match_email_to_campaign as _match_email_to_campaign
 from app.logger import setup_logger
 
 from app.routes.campaigns import router as campaigns_router
@@ -21,12 +22,10 @@ logger = setup_logger("arbitrage_desk")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 1. DB & Checkpointer init
     init_db()
     setup_checkpointer()
     worker_task = None
 
-    # 2. Setup Push Webhook Watch or Polling Worker
     if settings.use_push_webhooks:
         topic = settings.google_pubsub_topic
         if topic:
@@ -66,7 +65,6 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title=f"{settings.desk_name} - Physical Commodity Arbitrage",
-    description="Educational Mid-Level Autonomous Physical Commodity Arbitrage Agent",
     version="2.0.0",
     lifespan=lifespan,
 )

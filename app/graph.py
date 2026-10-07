@@ -42,7 +42,6 @@ checkpointer = InMemorySaver()
 
 
 def setup_checkpointer():
-    """Startup setup step calling checkpointer.setup() to initialize checkpoint tables."""
     try:
         if hasattr(pool, "closed") and pool.closed:
             pool.open()

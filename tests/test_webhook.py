@@ -102,10 +102,11 @@ def test_gmail_client_watch():
 
 
 def test_gmail_client_history_fetch():
+    from app.gmail_client import PROCESSED_GMAIL_MESSAGE_IDS
+    PROCESSED_GMAIL_MESSAGE_IDS.clear()
     print("\n--- 3. Testing Gmail Service fetch_latest_messages_by_history ---")
     mock_service = MagicMock()
 
-    # Mock history list
     mock_history_list = MagicMock()
     mock_history_list.execute.return_value = {
         "history": [
@@ -266,8 +267,8 @@ def test_webhook_immediate_response_and_background():
         "subscription": "projects/arbitrage-desk/subscriptions/gmail-sub",
     }
 
-    with patch("app.main.fetch_latest_messages_by_history", return_value=mock_incoming_messages), \
-         patch("app.main.send_gmail_reply", return_value=True) as mock_send_reply:
+    with patch("app.services.gmail_worker.fetch_latest_messages_by_history", return_value=mock_incoming_messages), \
+         patch("app.services.gmail_worker.send_gmail_reply", return_value=True) as mock_send_reply:
 
         # Send push webhook to POST /api/webhooks/gmail
         res = client.post("/api/webhooks/gmail", json=payload)
@@ -329,8 +330,8 @@ def test_webhook_ignores_desk_own_email():
     pubsub_json_data = json.dumps({"historyId": "112233"})
     data_b64 = base64.b64encode(pubsub_json_data.encode("utf-8")).decode("utf-8")
 
-    with patch("app.main.fetch_latest_messages_by_history", return_value=desk_msg), \
-         patch("app.main.send_gmail_reply") as mock_send:
+    with patch("app.services.gmail_worker.fetch_latest_messages_by_history", return_value=desk_msg), \
+         patch("app.services.gmail_worker.send_gmail_reply") as mock_send:
 
         res = client.post("/api/webhooks/gmail", json={"message": {"data": data_b64}})
         assert_true(res.status_code == 200, "Desk own message webhook returned 200")
@@ -360,7 +361,7 @@ def test_webhook_ignores_bounce_messages():
     pubsub_json_data = json.dumps({"historyId": "445566"})
     data_b64 = base64.b64encode(pubsub_json_data.encode("utf-8")).decode("utf-8")
 
-    with patch("app.main.fetch_latest_messages_by_history", return_value=bounce_msg):
+    with patch("app.services.gmail_worker.fetch_latest_messages_by_history", return_value=bounce_msg):
         res = client.post("/api/webhooks/gmail", json={"message": {"data": data_b64}})
         assert_true(res.status_code == 200, "Bounce webhook returned 200")
 

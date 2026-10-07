@@ -67,7 +67,7 @@ def approval_gate_node(state: DealState):
                 "evaluation_reason": decision.get("reviewer_notes", "Trader floor override"),
             },
         )
-    else:  # decision.get("approved") is False (hard decline)
+    else:
         return Command(
             goto="reject_deal",
             update={

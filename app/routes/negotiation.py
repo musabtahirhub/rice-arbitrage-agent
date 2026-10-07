@@ -9,10 +9,11 @@ from app.db_models import CampaignModel, TradeAuditModel
 from app.directory import get_buyers_for_commodity, get_suppliers_for_commodity
 import app.email_service as email_service
 from app.models import ApprovalPayload, SimulateTurnRequest
-from app.workflow import trade_graph
+import app.workflow
 
 logger = logging.getLogger("arbitrage_desk")
 router = APIRouter()
+
 
 @router.post("/api/negotiate")
 def negotiate_turn(req: SimulateTurnRequest, db: Session = Depends(get_db)):
@@ -23,7 +24,7 @@ def negotiate_turn(req: SimulateTurnRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail=f"Campaign {req.campaign_id} not found.")
 
     config = {"configurable": {"thread_id": req.campaign_id}}
-    snapshot = trade_graph.get_state(config)
+    snapshot = app.workflow.trade_graph.get_state(config)
     state = dict(snapshot.values) if snapshot and snapshot.values else {}
     if not state:
         logger.warning(f"[API NEGOTIATE] State for campaign '{req.campaign_id}' not found.")
@@ -32,12 +33,14 @@ def negotiate_turn(req: SimulateTurnRequest, db: Session = Depends(get_db)):
     turn_state = dict(state)
     turn_state["latest_email"] = req.raw_email
     turn_state["active_role"] = req.sender_role
+    turn_state["buyer_draft"] = ""
+    turn_state["supplier_draft"] = ""
 
-    updated_state = trade_graph.invoke(turn_state, config=config)
+    updated_state = app.workflow.trade_graph.invoke(turn_state, config=config)
 
-    snapshot = trade_graph.get_state(config)
+    snapshot = app.workflow.trade_graph.get_state(config)
     if snapshot and snapshot.next and "approval_gate" in snapshot.next:
-        trade_graph.update_state(config, {"deal_status": "pending_approval"})
+        app.workflow.trade_graph.update_state(config, {"deal_status": "pending_approval"})
         updated_state["deal_status"] = "pending_approval"
 
     buyer_t = updated_state.get("buyer_terms")
@@ -64,7 +67,7 @@ def negotiate_turn(req: SimulateTurnRequest, db: Session = Depends(get_db)):
         if req.sender_role == "supplier" or updated_state.get("action") in ["ACCEPT_AND_CLOSE", "REJECT_HARD", "COUNTER_TO_MAXIMIZE"]
         else updated_state.get("supplier_draft")
     )
-    if outbound_msg:
+    if outbound_msg and updated_state.get("deal_status") != "pending_approval":
         outbound_audit = TradeAuditModel(
             campaign_id=req.campaign_id,
             thread_id=req.campaign_id,
@@ -116,12 +119,12 @@ def approve_campaign_deal(campaign_id: str, payload: ApprovalPayload, db: Sessio
         raise HTTPException(status_code=404, detail=f"Campaign {campaign_id} not found.")
 
     config = {"configurable": {"thread_id": campaign_id}}
-    snapshot = trade_graph.get_state(config)
+    snapshot = app.workflow.trade_graph.get_state(config)
     if not snapshot or not snapshot.values:
         logger.warning(f"[API APPROVE] State for campaign '{campaign_id}' not found.")
         raise HTTPException(status_code=404, detail=f"State for campaign {campaign_id} not found.")
 
-    resumed_state = trade_graph.invoke(Command(resume=payload.model_dump()), config=config)
+    resumed_state = app.workflow.trade_graph.invoke(Command(resume=payload.model_dump()), config=config)
 
     buyer_msg = resumed_state.get("buyer_draft")
     if buyer_msg and not resumed_state.get("skip_email_dispatch", False):
@@ -130,34 +133,61 @@ def approve_campaign_deal(campaign_id: str, payload: ApprovalPayload, db: Sessio
         buyers = get_buyers_for_commodity(comm)
         buyer_email = (
             resumed_state.get("target_buyer_email")
-            or (buyers[0].contact_email if buyers else (settings.my_test_email or "procurement@domain.com"))
+            or (settings.my_test_email.strip() if settings.my_test_email else None)
+            or (buyers[0].contact_email if buyers else "procurement@domain.com")
         )
 
         in_reply_to = resumed_state.get("last_buyer_message_id")
         references = resumed_state.get("buyer_references")
         thread_subject = resumed_state.get("thread_subject")
+        thread_id = resumed_state.get("thread_id")
 
-        email_service.send_email(
-            buyer_email,
-            buyer_msg,
-            in_reply_to=in_reply_to,
-            references=references,
-            thread_subject=thread_subject,
-        )
+        if settings.use_push_webhooks:
+            from app.gmail_client import send_gmail_reply
+            send_gmail_reply(
+                to_email=buyer_email,
+                raw_draft=buyer_msg,
+                in_reply_to=in_reply_to,
+                references=references,
+                thread_subject=thread_subject,
+                thread_id=thread_id,
+            )
+        else:
+            email_service.send_email(
+                buyer_email,
+                buyer_msg,
+                in_reply_to=in_reply_to,
+                references=references,
+                thread_subject=thread_subject,
+            )
 
     supp_msg = resumed_state.get("supplier_draft")
     if supp_msg and resumed_state.get("deal_status") == "closed" and not resumed_state.get("skip_email_dispatch", False):
         camp = resumed_state.get("campaign")
         comm = getattr(camp, "commodity", None) or db_camp.commodity
         suppliers = get_suppliers_for_commodity(comm)
-        supp_email = suppliers[0].contact_email if suppliers else (settings.my_test_email or "export@supplier.com")
-        email_service.send_email(
-            supp_email,
-            supp_msg,
-            in_reply_to=resumed_state.get("last_supplier_message_id"),
-            references=resumed_state.get("supplier_references"),
-            thread_subject=f"Deal Confirmation & Volume Lock — {comm}",
+        supp_email = (
+            resumed_state.get("target_supplier_email")
+            or (settings.my_test_email.strip() if settings.my_test_email else None)
+            or (suppliers[0].contact_email if suppliers else "export@supplier.com")
         )
+        if settings.use_push_webhooks:
+            from app.gmail_client import send_gmail_reply
+            send_gmail_reply(
+                to_email=supp_email,
+                raw_draft=supp_msg,
+                in_reply_to=resumed_state.get("last_supplier_message_id"),
+                references=resumed_state.get("supplier_references"),
+                thread_subject=f"Deal Confirmation & Volume Lock — {comm}",
+            )
+        else:
+            email_service.send_email(
+                supp_email,
+                supp_msg,
+                in_reply_to=resumed_state.get("last_supplier_message_id"),
+                references=resumed_state.get("supplier_references"),
+                thread_subject=f"Deal Confirmation & Volume Lock — {comm}",
+            )
 
     if buyer_msg:
         outbound_audit = TradeAuditModel(

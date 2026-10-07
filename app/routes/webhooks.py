@@ -10,11 +10,6 @@ router = APIRouter()
 
 @router.post("/api/webhooks/gmail")
 async def gmail_webhook_endpoint(request: Request, background_tasks: BackgroundTasks):
-    """
-    Real-time Google Cloud Pub/Sub push notification endpoint for Gmail watch.
-    Reads JSON payload: {"message": {"data": "<base64_encoded>"}}, acknowledges Pub/Sub with 200 immediately,
-    and offloads processing to process_incoming_gmail_event(history_id).
-    """
     try:
         body = await request.json()
     except Exception as e:

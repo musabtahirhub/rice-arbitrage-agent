@@ -39,7 +39,7 @@ class TradeAuditModel(Base):
     counterparty_price = Column(Float, nullable=True)
     net_spread = Column(Float, nullable=True)
     raw_message = Column(Text, nullable=False)
-    direction = Column(String, nullable=False)  # "INBOUND" or "OUTBOUND"
+    direction = Column(String, nullable=False)
     created_at = Column(DateTime, default=_utcnow, nullable=False)
 
     campaign = relationship("CampaignModel", back_populates="trade_audits")

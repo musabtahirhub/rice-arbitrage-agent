@@ -7,7 +7,7 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.database import SessionLocal
+import app.database
 from app.db_models import CampaignModel, TradeAuditModel
 from app.directory import get_buyers_for_commodity, get_suppliers_for_commodity
 from app.email_service import (
@@ -23,7 +23,8 @@ from app.gmail_client import (
 )
 from app.market import get_benchmark_rate
 from app.models import Campaign, ParsedEmail
-from app.workflow import split_subject_and_body, trade_graph
+import app.workflow
+from app.workflow import split_subject_and_body
 from app.services.email_matcher import match_email_to_campaign
 
 logger = logging.getLogger("arbitrage_desk")
@@ -44,7 +45,7 @@ async def email_polling_worker():
             if settings.my_test_email:
                 allowed_senders.add(settings.my_test_email.strip().lower())
 
-            with SessionLocal() as db:
+            with app.database.SessionLocal() as db:
                 active_campaigns = (
                     db.query(CampaignModel)
                     .filter(~CampaignModel.deal_status.in_(["closed", "rejected"]))
@@ -68,7 +69,7 @@ async def email_polling_worker():
                 references = getattr(incoming, "references", "")
                 logger.info(f"[EMAIL WORKER] Inbound email detected from '{sender}' | Subject: '{sub}' | Message-ID: '{msg_id}'")
 
-                with SessionLocal() as db:
+                with app.database.SessionLocal() as db:
                     matched_cid = match_email_to_campaign(sub, raw_body, sender, db=db)
                     db_camp = db.query(CampaignModel).filter(CampaignModel.id == matched_cid).first() if matched_cid else None
                     if db_camp:
@@ -77,7 +78,7 @@ async def email_polling_worker():
                         else:
                             logger.info(f"[EMAIL WORKER] Processing inbound email for campaign: {matched_cid}")
                             config = {"configurable": {"thread_id": db_camp.id}}
-                            snapshot = trade_graph.get_state(config)
+                            snapshot = app.workflow.trade_graph.get_state(config)
                             state = dict(snapshot.values) if snapshot and snapshot.values else {}
                             if "campaign" not in state:
                                 state["campaign"] = Campaign(
@@ -90,6 +91,8 @@ async def email_polling_worker():
 
                             state["latest_email"] = raw_body
                             state["active_role"] = "buyer"
+                            state["buyer_draft"] = ""
+                            state["supplier_draft"] = ""
 
                             if msg_id:
                                 state["last_buyer_message_id"] = msg_id
@@ -158,11 +161,16 @@ async def email_polling_worker():
                                 )
                                 db.add(supp_audit)
 
-                            updated_state = await asyncio.to_thread(trade_graph.invoke, state, config)
+                            g_config = {"configurable": {"thread_id": db_camp.id}}
+                            updated_state = await asyncio.to_thread(
+                                app.workflow.trade_graph.invoke,
+                                state,
+                                config=g_config,
+                            )
 
-                            snapshot = trade_graph.get_state(config)
+                            snapshot = app.workflow.trade_graph.get_state(g_config)
                             if snapshot and snapshot.next and "approval_gate" in snapshot.next:
-                                trade_graph.update_state(config, {"deal_status": "pending_approval"})
+                                app.workflow.trade_graph.update_state(g_config, {"deal_status": "pending_approval"})
                                 updated_state["deal_status"] = "pending_approval"
 
                             if "audit_transcript" not in updated_state or updated_state["audit_transcript"] is None:
@@ -179,7 +187,6 @@ async def email_polling_worker():
                                 "message": raw_body,
                             })
 
-                            # Persist inbound email into TradeAuditModel
                             buyer_t = updated_state.get("buyer_terms")
                             inbound_price = buyer_t.price_usd_per_mt if buyer_t else None
                             inbound_audit = TradeAuditModel(
@@ -198,101 +205,102 @@ async def email_polling_worker():
                             buyer_msg = updated_state.get("buyer_draft")
                             supp_msg = updated_state.get("supplier_draft")
 
-                            if supp_msg and (action in ["ACCEPT_AND_CLOSE", "LOCK_SUPPLIER_ALLOCATION"] or "Volume Lock" in supp_msg or not state.get("supplier_terms")):
-                                supp_thread_sub = f"Urgent RFQ — {camp.commodity} FOB {camp.origin_port_default}"
-                                await asyncio.to_thread(
-                                    send_email,
-                                    supp_email,
-                                    supp_msg,
-                                    in_reply_to=updated_state.get("last_supplier_message_id"),
-                                    references=updated_state.get("supplier_references"),
-                                    thread_subject=supp_thread_sub,
-                                )
+                            if deal_status == "pending_approval" or (snapshot and snapshot.next and "approval_gate" in snapshot.next):
                                 logger.info(
-                                    f"[OUTBOUND EMAIL] Dispatched supplier message to '{supp_email}' | "
-                                    f"Action: {'LOCK_SUPPLIER_ALLOCATION' if action == 'ACCEPT_AND_CLOSE' else 'SUPPLIER_RFQ'} | "
-                                    f"Subject: '{supp_thread_sub}'"
+                                    f"[EMAIL WORKER] Campaign {matched_cid} is awaiting human approval. "
+                                    f"Halting outbound dispatch until human review."
                                 )
-                                supp_sub, _ = split_subject_and_body(
-                                    supp_msg,
-                                    default_subject=f"Urgent RFQ / Volume Lock — {camp.commodity} FOB {camp.origin_port_default}",
-                                )
-                                updated_state["audit_transcript"].append({
-                                    "turn": curr_round,
-                                    "sender": f"Trading Desk ({settings.desk_name})",
-                                    "recipient": f"{supp_name} <{supp_email}>",
-                                    "role": "agent",
-                                    "action": "LOCK_SUPPLIER_ALLOCATION" if action == "ACCEPT_AND_CLOSE" else "SUPPLIER_RFQ",
-                                    "subject": supp_sub,
-                                    "message": supp_msg,
-                                })
-                                supp_out_audit = TradeAuditModel(
-                                    campaign_id=db_camp.id,
-                                    thread_id=db_camp.id,
-                                    role="agent",
-                                    counterparty_price=state.get("supplier_terms").price_usd_per_mt if state.get("supplier_terms") else None,
-                                    net_spread=updated_state.get("net_spread_usd"),
-                                    raw_message=supp_msg,
-                                    direction="OUTBOUND",
-                                )
-                                db.add(supp_out_audit)
-
-                            if buyer_msg:
-                                default_sub = (
-                                    f"Soft Corporate Offer (SCO) Acceptance — {camp.commodity}"
-                                    if action == "ACCEPT_AND_CLOSE"
-                                    else (
-                                        f"Commercial Proposal Status — {camp.commodity}"
-                                        if action == "REJECT_HARD"
-                                        else f"Counter-Offer — {camp.commodity} CIF {camp.destination_port}"
+                            else:
+                                if supp_msg and (action in ["ACCEPT_AND_CLOSE", "LOCK_SUPPLIER_ALLOCATION"] or "Volume Lock" in supp_msg or not state.get("supplier_terms")):
+                                    supp_thread_sub = f"Urgent RFQ — {camp.commodity} FOB {camp.origin_port_default}"
+                                    await asyncio.to_thread(
+                                        send_email,
+                                        supp_email,
+                                        supp_msg,
+                                        in_reply_to=updated_state.get("last_supplier_message_id"),
+                                        references=updated_state.get("supplier_references"),
+                                        thread_subject=supp_thread_sub,
                                     )
-                                )
-                                buyer_sub, _ = split_subject_and_body(buyer_msg, default_subject=default_sub)
-                                thread_sub = updated_state.get("thread_subject") or buyer_sub
+                                    logger.info(
+                                        f"[OUTBOUND EMAIL] Dispatched supplier message to '{supp_email}' | "
+                                        f"Action: {'LOCK_SUPPLIER_ALLOCATION' if action == 'ACCEPT_AND_CLOSE' else 'SUPPLIER_RFQ'} | "
+                                        f"Subject: '{supp_thread_sub}'"
+                                    )
+                                    supp_sub, _ = split_subject_and_body(
+                                        supp_msg,
+                                        default_subject=f"Urgent RFQ / Volume Lock — {camp.commodity} FOB {camp.origin_port_default}",
+                                    )
+                                    updated_state["audit_transcript"].append({
+                                        "turn": curr_round,
+                                        "sender": f"Trading Desk ({settings.desk_name})",
+                                        "recipient": f"{supp_name} <{supp_email}>",
+                                        "role": "agent",
+                                        "action": "LOCK_SUPPLIER_ALLOCATION" if action == "ACCEPT_AND_CLOSE" else "SUPPLIER_RFQ",
+                                        "subject": supp_sub,
+                                        "message": supp_msg,
+                                    })
+                                    supp_out_audit = TradeAuditModel(
+                                        campaign_id=db_camp.id,
+                                        thread_id=db_camp.id,
+                                        role="agent",
+                                        counterparty_price=state.get("supplier_terms").price_usd_per_mt if state.get("supplier_terms") else None,
+                                        net_spread=updated_state.get("net_spread_usd"),
+                                        raw_message=supp_msg,
+                                        direction="OUTBOUND",
+                                    )
+                                    db.add(supp_out_audit)
 
-                                clean_desk_user = settings.email_user.strip()
-                                desk_domain = clean_desk_user.split("@")[1] if "@" in clean_desk_user else "gmail.com"
-                                response_msg_id = email.utils.make_msgid(domain=desk_domain)
+                                if buyer_msg:
+                                    default_sub = (
+                                        f"Soft Corporate Offer (SCO) Acceptance — {camp.commodity}"
+                                        if action == "ACCEPT_AND_CLOSE"
+                                        else (
+                                            f"Commercial Proposal Status — {camp.commodity}"
+                                            if action == "REJECT_HARD"
+                                            else f"Counter-Offer — {camp.commodity} CIF {camp.destination_port}"
+                                        )
+                                    )
+                                    buyer_sub, _ = split_subject_and_body(buyer_msg, default_subject=default_sub)
+                                    thread_sub = updated_state.get("thread_subject") or buyer_sub
 
-                                await asyncio.to_thread(
-                                    send_email,
-                                    buyer_email,
-                                    buyer_msg,
-                                    in_reply_to=updated_state.get("last_buyer_message_id"),
-                                    references=updated_state.get("buyer_references"),
-                                    thread_subject=thread_sub,
-                                    custom_message_id=response_msg_id,
-                                )
+                                    clean_desk_user = settings.email_user.strip()
+                                    desk_domain = clean_desk_user.split("@")[1] if "@" in clean_desk_user else "gmail.com"
+                                    response_msg_id = email.utils.make_msgid(domain=desk_domain)
 
-                                actual_thread_sub = normalize_thread_subject(buyer_sub, thread_sub)
-                                logger.info(
-                                    f"[OUTBOUND EMAIL] Dispatched buyer response to '{buyer_email}' | "
-                                    f"Action: {action} | Subject: '{actual_thread_sub}' | Message-ID: '{response_msg_id}'"
-                                )
-
-                                updated_state["last_buyer_message_id"] = response_msg_id
-                                cur_refs = updated_state.get("buyer_references") or ""
-                                updated_state["buyer_references"] = f"{cur_refs} {response_msg_id}".strip()
-
-                                updated_state["audit_transcript"].append({
-                                    "turn": curr_round,
-                                    "sender": f"Trading Desk ({settings.desk_name})",
-                                    "recipient": f"{buyer_name} <{buyer_email}>",
-                                    "role": "agent",
-                                    "action": action or "COUNTER_BUYER",
-                                    "subject": actual_thread_sub,
-                                    "message": buyer_msg,
-                                })
-                                buyer_out_audit = TradeAuditModel(
-                                    campaign_id=db_camp.id,
-                                    thread_id=db_camp.id,
-                                    role="agent",
-                                    counterparty_price=updated_state.get("anchor_cif_usd"),
-                                    net_spread=updated_state.get("net_spread_usd"),
-                                    raw_message=buyer_msg,
-                                    direction="OUTBOUND",
-                                )
-                                db.add(buyer_out_audit)
+                                    await asyncio.to_thread(
+                                        send_email,
+                                        buyer_email,
+                                        buyer_msg,
+                                        in_reply_to=updated_state.get("last_buyer_message_id"),
+                                        references=updated_state.get("buyer_references"),
+                                        thread_subject=thread_sub,
+                                        custom_message_id=response_msg_id,
+                                    )
+                                    actual_thread_sub = normalize_thread_subject(buyer_sub, thread_sub)
+                                    logger.info(
+                                        f"[OUTBOUND EMAIL] Dispatched buyer reply to '{buyer_email}' | "
+                                        f"Action: {action} | Subject: '{actual_thread_sub}'"
+                                    )
+                                    updated_state["audit_transcript"].append({
+                                        "turn": curr_round,
+                                        "sender": f"Trading Desk ({settings.desk_name})",
+                                        "recipient": f"{buyer_name} <{buyer_email}>",
+                                        "role": "agent",
+                                        "action": action or "COUNTER_BUYER",
+                                        "subject": actual_thread_sub,
+                                        "message": buyer_msg,
+                                        "id": response_msg_id,
+                                    })
+                                    buyer_out_audit = TradeAuditModel(
+                                        campaign_id=db_camp.id,
+                                        thread_id=db_camp.id,
+                                        role="agent",
+                                        counterparty_price=updated_state.get("anchor_cif_usd"),
+                                        net_spread=updated_state.get("net_spread_usd"),
+                                        raw_message=buyer_msg,
+                                        direction="OUTBOUND",
+                                    )
+                                    db.add(buyer_out_audit)
 
                             db_camp.deal_status = deal_status or db_camp.deal_status
                             db.commit()
@@ -310,15 +318,6 @@ async def email_polling_worker():
 
 
 async def process_incoming_gmail_event(history_id: str):
-    """
-    Background worker to process incoming Gmail Pub/Sub events:
-    a) Retrieve newly added messages via fetch_latest_messages_by_history using LAST_SEEN_HISTORY_ID.
-       Falls back to direct inbox message listing if history is empty, expired, or startHistoryId matches.
-    b) Query active campaigns from PostgreSQL (CampaignModel).
-    c) Inject incoming message and headers (last_buyer_message_id, buyer_references, thread_subject) into DealState.
-    d) Invoke LangGraph: trade_graph.invoke(input_state, config={"configurable": {"thread_id": campaign.id}}).
-    e) If an outbound response is drafted, send it via send_gmail_reply(...) and persist an audit row into TradeAuditModel.
-    """
     async with GMAIL_EVENT_LOCK:
         global LAST_SEEN_HISTORY_ID
         start_history_id = LAST_SEEN_HISTORY_ID
@@ -352,7 +351,6 @@ async def process_incoming_gmail_event(history_id: str):
         sender = msg_data.get("From") or msg_data.get("from") or msg_data.get("sender") or ""
         sender_lower = sender.strip().lower()
 
-        # Step a: Ignore messages sent by the desk's own email
         if any(desk_e in sender_lower for desk_e in desk_emails):
             logger.info(f"[GMAIL EVENT] Ignoring message from desk's own email: {sender}")
             continue
@@ -370,8 +368,7 @@ async def process_incoming_gmail_event(history_id: str):
 
         logger.info(f"[GMAIL EVENT] Inbound email detected from '{sender}' | Subject: '{sub}' | Message-ID: '{msg_id}'")
 
-        # Step b: Query active campaigns from PostgreSQL (CampaignModel)
-        with SessionLocal() as db:
+        with app.database.SessionLocal() as db:
             active_campaigns = (
                 db.query(CampaignModel)
                 .filter(~CampaignModel.deal_status.in_(["closed", "rejected"]))
@@ -394,9 +391,8 @@ async def process_incoming_gmail_event(history_id: str):
 
             logger.info(f"[GMAIL EVENT] Processing inbound email for campaign: {matched_cid}")
 
-            # Step c: Inject incoming message and headers (last_buyer_message_id, buyer_references, thread_subject) into DealState
             config = {"configurable": {"thread_id": db_camp.id}}
-            snapshot = trade_graph.get_state(config)
+            snapshot = app.workflow.trade_graph.get_state(config)
             state = dict(snapshot.values) if snapshot and snapshot.values else {}
             if "campaign" not in state:
                 state["campaign"] = Campaign(
@@ -409,6 +405,8 @@ async def process_incoming_gmail_event(history_id: str):
 
             state["latest_email"] = raw_body
             state["active_role"] = "buyer"
+            state["buyer_draft"] = ""
+            state["supplier_draft"] = ""
 
             if msg_id:
                 state["last_buyer_message_id"] = msg_id
@@ -422,6 +420,9 @@ async def process_incoming_gmail_event(history_id: str):
                 clean_sub = re.sub(r"^(?:re|fwd|fw):\s*", "", sub, flags=re.IGNORECASE).strip()
                 state["thread_subject"] = clean_sub
 
+            if thread_id:
+                state["thread_id"] = thread_id
+
             camp: Campaign = state["campaign"]
             buyers = get_buyers_for_commodity(camp.commodity)
             suppliers = get_suppliers_for_commodity(camp.commodity)
@@ -433,6 +434,12 @@ async def process_incoming_gmail_event(history_id: str):
             buyer_email = settings.my_test_email or (primary_buyer.contact_email if primary_buyer else "procurement@domain.com")
             supp_name = target_supplier.name if target_supplier else "Supplier Partner"
             supp_email = target_supplier.contact_email if target_supplier else "export@supplier.com"
+
+            parsed_sender_email = email.utils.parseaddr(sender)[1]
+            if parsed_sender_email and not any(desk_e in parsed_sender_email.lower() for desk_e in desk_emails):
+                state["target_buyer_email"] = parsed_sender_email
+            else:
+                state["target_buyer_email"] = buyer_email
 
             if state.get("supplier_terms") is None:
                 benchmark_fob = state.get("benchmark_fob_usd") or get_benchmark_rate(camp.commodity)
@@ -480,17 +487,16 @@ async def process_incoming_gmail_event(history_id: str):
                 )
                 db.add(supp_audit)
 
-            # Step d: Invoke LangGraph
             g_config = {"configurable": {"thread_id": db_camp.id}}
             updated_state = await asyncio.to_thread(
-                trade_graph.invoke,
+                app.workflow.trade_graph.invoke,
                 state,
                 config=g_config,
             )
 
-            snapshot = trade_graph.get_state(g_config)
+            snapshot = app.workflow.trade_graph.get_state(g_config)
             if snapshot and snapshot.next and "approval_gate" in snapshot.next:
-                trade_graph.update_state(g_config, {"deal_status": "pending_approval"})
+                app.workflow.trade_graph.update_state(g_config, {"deal_status": "pending_approval"})
                 updated_state["deal_status"] = "pending_approval"
 
             if "audit_transcript" not in updated_state or updated_state["audit_transcript"] is None:
@@ -507,7 +513,6 @@ async def process_incoming_gmail_event(history_id: str):
                 "message": raw_body,
             })
 
-            # Inbound audit record
             buyer_t = updated_state.get("buyer_terms")
             inbound_price = buyer_t.price_usd_per_mt if buyer_t else None
             inbound_audit = TradeAuditModel(
@@ -526,91 +531,96 @@ async def process_incoming_gmail_event(history_id: str):
             buyer_msg = updated_state.get("buyer_draft")
             supp_msg = updated_state.get("supplier_draft")
 
-            if supp_msg and (action in ["ACCEPT_AND_CLOSE", "LOCK_SUPPLIER_ALLOCATION"] or "Volume Lock" in supp_msg or not state.get("supplier_terms")):
-                supp_thread_sub = f"Urgent RFQ — {camp.commodity} FOB {camp.origin_port_default}"
-                await asyncio.to_thread(
-                    send_gmail_reply,
-                    supp_email,
-                    supp_msg,
-                    in_reply_to=updated_state.get("last_supplier_message_id"),
-                    references=updated_state.get("supplier_references"),
-                    thread_subject=supp_thread_sub,
-                    thread_id=thread_id or None,
-                )
-                supp_sub, _ = split_subject_and_body(
-                    supp_msg,
-                    default_subject=f"Urgent RFQ / Volume Lock — {camp.commodity} FOB {camp.origin_port_default}",
-                )
-                updated_state["audit_transcript"].append({
-                    "turn": curr_round,
-                    "sender": f"Trading Desk ({settings.desk_name})",
-                    "recipient": f"{supp_name} <{supp_email}>",
-                    "role": "agent",
-                    "action": "LOCK_SUPPLIER_ALLOCATION" if action == "ACCEPT_AND_CLOSE" else "SUPPLIER_RFQ",
-                    "subject": supp_sub,
-                    "message": supp_msg,
-                    "id": msg_id,
-                })
-                supp_out_audit = TradeAuditModel(
-                    campaign_id=db_camp.id,
-                    thread_id=db_camp.id,
-                    role="agent",
-                    counterparty_price=state.get("supplier_terms").price_usd_per_mt if state.get("supplier_terms") else None,
-                    net_spread=updated_state.get("net_spread_usd"),
-                    raw_message=supp_msg,
-                    direction="OUTBOUND",
-                )
-                db.add(supp_out_audit)
-
-            # Step e: If an outbound response is drafted, send it via send_gmail_reply(...) and persist an audit row into TradeAuditModel
-            if buyer_msg:
-                default_sub = (
-                    f"Soft Corporate Offer (SCO) Acceptance — {camp.commodity}"
-                    if action == "ACCEPT_AND_CLOSE"
-                    else (
-                        f"Commercial Proposal Status — {camp.commodity}"
-                        if action == "REJECT_HARD"
-                        else f"Counter-Offer — {camp.commodity} CIF {camp.destination_port}"
-                    )
-                )
-                buyer_sub, _ = split_subject_and_body(buyer_msg, default_subject=default_sub)
-                thread_sub = updated_state.get("thread_subject") or buyer_sub
-
-                await asyncio.to_thread(
-                    send_gmail_reply,
-                    buyer_email,
-                    buyer_msg,
-                    in_reply_to=updated_state.get("last_buyer_message_id"),
-                    references=updated_state.get("buyer_references"),
-                    thread_subject=thread_sub,
-                    thread_id=thread_id or None,
-                )
-
-                actual_thread_sub = normalize_thread_subject(buyer_sub, thread_sub)
+            if deal_status == "pending_approval" or (snapshot and snapshot.next and "approval_gate" in snapshot.next):
                 logger.info(
-                    f"[GMAIL EVENT] Dispatched buyer response to '{buyer_email}' via Gmail REST API | "
-                    f"Action: {action} | Subject: '{actual_thread_sub}'"
+                    f"[GMAIL EVENT] Campaign {matched_cid} is awaiting human approval. "
+                    f"Halting outbound buyer dispatch until approval is confirmed."
                 )
+            else:
+                if supp_msg and (action in ["ACCEPT_AND_CLOSE", "LOCK_SUPPLIER_ALLOCATION"] or "Volume Lock" in supp_msg or not state.get("supplier_terms")):
+                    supp_thread_sub = f"Urgent RFQ — {camp.commodity} FOB {camp.origin_port_default}"
+                    await asyncio.to_thread(
+                        send_gmail_reply,
+                        supp_email,
+                        supp_msg,
+                        in_reply_to=updated_state.get("last_supplier_message_id"),
+                        references=updated_state.get("supplier_references"),
+                        thread_subject=supp_thread_sub,
+                        thread_id=thread_id or None,
+                    )
+                    supp_sub, _ = split_subject_and_body(
+                        supp_msg,
+                        default_subject=f"Urgent RFQ / Volume Lock — {camp.commodity} FOB {camp.origin_port_default}",
+                    )
+                    updated_state["audit_transcript"].append({
+                        "turn": curr_round,
+                        "sender": f"Trading Desk ({settings.desk_name})",
+                        "recipient": f"{supp_name} <{supp_email}>",
+                        "role": "agent",
+                        "action": "LOCK_SUPPLIER_ALLOCATION" if action == "ACCEPT_AND_CLOSE" else "SUPPLIER_RFQ",
+                        "subject": supp_sub,
+                        "message": supp_msg,
+                        "id": msg_id,
+                    })
+                    supp_out_audit = TradeAuditModel(
+                        campaign_id=db_camp.id,
+                        thread_id=db_camp.id,
+                        role="agent",
+                        counterparty_price=state.get("supplier_terms").price_usd_per_mt if state.get("supplier_terms") else None,
+                        net_spread=updated_state.get("net_spread_usd"),
+                        raw_message=supp_msg,
+                        direction="OUTBOUND",
+                    )
+                    db.add(supp_out_audit)
 
-                updated_state["audit_transcript"].append({
-                    "turn": curr_round,
-                    "sender": f"Trading Desk ({settings.desk_name})",
-                    "recipient": f"{buyer_name} <{buyer_email}>",
-                    "role": "agent",
-                    "action": action or "COUNTER_BUYER",
-                    "subject": actual_thread_sub,
-                    "message": buyer_msg,
-                })
-                buyer_out_audit = TradeAuditModel(
-                    campaign_id=db_camp.id,
-                    thread_id=db_camp.id,
-                    role="agent",
-                    counterparty_price=updated_state.get("anchor_cif_usd"),
-                    net_spread=updated_state.get("net_spread_usd"),
-                    raw_message=buyer_msg,
-                    direction="OUTBOUND",
-                )
-                db.add(buyer_out_audit)
+                if buyer_msg:
+                    default_sub = (
+                        f"Soft Corporate Offer (SCO) Acceptance — {camp.commodity}"
+                        if action == "ACCEPT_AND_CLOSE"
+                        else (
+                            f"Commercial Proposal Status — {camp.commodity}"
+                            if action == "REJECT_HARD"
+                            else f"Counter-Offer — {camp.commodity} CIF {camp.destination_port}"
+                        )
+                    )
+                    buyer_sub, _ = split_subject_and_body(buyer_msg, default_subject=default_sub)
+                    thread_sub = updated_state.get("thread_subject") or buyer_sub
+
+                    await asyncio.to_thread(
+                        send_gmail_reply,
+                        buyer_email,
+                        buyer_msg,
+                        in_reply_to=updated_state.get("last_buyer_message_id"),
+                        references=updated_state.get("buyer_references"),
+                        thread_subject=thread_sub,
+                        thread_id=thread_id or None,
+                    )
+
+                    actual_thread_sub = normalize_thread_subject(buyer_sub, thread_sub)
+                    logger.info(
+                        f"[GMAIL EVENT] Dispatched buyer response to '{buyer_email}' via Gmail REST API | "
+                        f"Action: {action} | Subject: '{actual_thread_sub}'"
+                    )
+
+                    updated_state["audit_transcript"].append({
+                        "turn": curr_round,
+                        "sender": f"Trading Desk ({settings.desk_name})",
+                        "recipient": f"{buyer_name} <{buyer_email}>",
+                        "role": "agent",
+                        "action": action or "COUNTER_BUYER",
+                        "subject": actual_thread_sub,
+                        "message": buyer_msg,
+                    })
+                    buyer_out_audit = TradeAuditModel(
+                        campaign_id=db_camp.id,
+                        thread_id=db_camp.id,
+                        role="agent",
+                        counterparty_price=updated_state.get("anchor_cif_usd"),
+                        net_spread=updated_state.get("net_spread_usd"),
+                        raw_message=buyer_msg,
+                        direction="OUTBOUND",
+                    )
+                    db.add(buyer_out_audit)
 
             db_camp.deal_status = deal_status or db_camp.deal_status
             db.commit()

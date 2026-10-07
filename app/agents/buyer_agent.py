@@ -133,6 +133,8 @@ def proactive_outreach_node(state: DealState) -> dict:
         "supplier_references": None,
         "discovered_buyers": [b.model_dump() for b in buyers],
         "discovered_suppliers": [s.model_dump() for s in suppliers],
+        "target_buyer_email": target_buyer_email,
+        "target_buyer_name": buyer_name,
     }
 
 

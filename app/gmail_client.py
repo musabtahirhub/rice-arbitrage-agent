@@ -23,13 +23,37 @@ SCOPES = [
     "https://www.googleapis.com/auth/gmail.send",
 ]
 
+CACHE_FILE = Path(".cache/processed_gmail_ids.json")
+
+
+def _load_processed_ids() -> set[str]:
+    try:
+        if CACHE_FILE.exists():
+            with open(CACHE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    return set(data)
+    except Exception as e:
+        logger.warning(f"Failed loading processed gmail ids: {e}")
+    return set()
+
+
+def _save_processed_id(msg_id: str):
+    global PROCESSED_GMAIL_MESSAGE_IDS
+    PROCESSED_GMAIL_MESSAGE_IDS.add(msg_id)
+    try:
+        CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        to_save = list(PROCESSED_GMAIL_MESSAGE_IDS)[-2000:]
+        with open(CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(to_save, f)
+    except Exception as e:
+        logger.warning(f"Failed saving processed gmail id: {e}")
+
+
+PROCESSED_GMAIL_MESSAGE_IDS: set[str] = _load_processed_ids()
+
 
 def get_gmail_service():
-    """
-    Authenticates using credentials.json and caches tokens in token.json
-    using scopes ['https://www.googleapis.com/auth/gmail.modify', 'https://www.googleapis.com/auth/gmail.send'].
-    Handles token refresh automatically.
-    """
     creds = None
     token_path = settings.google_token_json_path
     credentials_path = settings.google_credentials_json_path
@@ -70,10 +94,6 @@ def get_gmail_service():
 
 
 def setup_gmail_watch(topic_name: str) -> dict:
-    """
-    Registers a push notification watch on the user's inbox with Google Cloud Pub/Sub.
-    Calls users().watch(userId='me', body={'topicName': topic_name, 'labelIds': ['INBOX']}).execute().
-    """
     service = get_gmail_service()
     body = {
         "topicName": topic_name,
@@ -85,10 +105,6 @@ def setup_gmail_watch(topic_name: str) -> dict:
 
 
 def _extract_body_from_payload(payload: dict) -> str:
-    """
-    Extracts and decodes UTF-8 text content from a Gmail message payload.
-    Supports single-part plain text, multipart payloads, and HTML fallbacks.
-    """
     if not payload:
         return ""
 
@@ -151,9 +167,6 @@ def _extract_body_from_payload(payload: dict) -> str:
 
 
 def _parse_gmail_message(full_msg: dict) -> dict:
-    """
-    Extracts RFC 5322 headers and body from a Gmail API message representation.
-    """
     msg_id = full_msg.get("id", "")
     thread_id = full_msg.get("threadId", "")
     payload = full_msg.get("payload", {})
@@ -192,28 +205,11 @@ def _parse_gmail_message(full_msg: dict) -> dict:
     }
 
 
-PROCESSED_GMAIL_MESSAGE_IDS: set[str] = set()
-
-
 def fetch_latest_messages_by_history(start_history_id: str) -> list[dict]:
-    """
-    Calls users().history().list(userId='me', startHistoryId=start_history_id, historyTypes=['messageAdded']).
-    If history returns empty or if startHistoryId fails/expires, falls back to fetching recent INBOX messages directly:
-        service.users().messages().list(userId="me", labelIds=["INBOX"], maxResults=3).execute()
-    Extracts full MIME payload, decodes UTF-8 text, captures RFC 5322 headers, and checks sender.
-    Prevents duplicate calls using PROCESSED_GMAIL_MESSAGE_IDS.
-    """
-    global PROCESSED_GMAIL_MESSAGE_IDS
     service = get_gmail_service()
     history_records = []
     seen_ids = set()
     messages_out = []
-
-    desk_emails = {
-        e.strip().lower()
-        for e in [settings.email_user, settings.desk_email, "musabtahir2@gmail.com"]
-        if e
-    }
 
     if start_history_id:
         try:
@@ -224,7 +220,7 @@ def fetch_latest_messages_by_history(start_history_id: str) -> list[dict]:
             ).execute()
             history_records = history_res.get("history", [])
         except Exception as e:
-            logger.warning(f"[GMAIL] Failed to list history for startHistoryId={start_history_id}: {e}. Falling back to direct inbox message listing.")
+            logger.warning(f"[GMAIL] Failed to list history for startHistoryId={start_history_id}: {e}")
 
     if history_records:
         for record in history_records:
@@ -242,48 +238,11 @@ def fetch_latest_messages_by_history(start_history_id: str) -> list[dict]:
                         id=msg_id,
                         format="full",
                     ).execute()
-                    PROCESSED_GMAIL_MESSAGE_IDS.add(msg_id)
+                    _save_processed_id(msg_id)
                     messages_out.append(_parse_gmail_message(full_msg))
                 except Exception as e:
                     logger.error(f"[GMAIL] Failed to fetch message {msg_id}: {e}")
                     continue
-        if messages_out:
-            return messages_out
-
-    # Direct fallback to fetch recent inbox messages when history is empty or expired:
-    logger.info("[GMAIL] History query returned no records; executing direct fallback to fetch recent INBOX messages.")
-    try:
-        res = service.users().messages().list(userId="me", labelIds=["INBOX"], maxResults=3).execute()
-        msg_list = res.get("messages", [])
-        for msg_stub in msg_list:
-            msg_id = msg_stub.get("id")
-            if not msg_id or msg_id in seen_ids or msg_id in PROCESSED_GMAIL_MESSAGE_IDS:
-                continue
-            seen_ids.add(msg_id)
-
-            try:
-                full_msg = service.users().messages().get(
-                    userId="me",
-                    id=msg_id,
-                    format="full",
-                ).execute()
-                PROCESSED_GMAIL_MESSAGE_IDS.add(msg_id)
-                parsed = _parse_gmail_message(full_msg)
-                sender = parsed.get("From") or parsed.get("from") or parsed.get("sender") or ""
-                sender_lower = sender.strip().lower()
-                if any(desk_e in sender_lower for desk_e in desk_emails):
-                    logger.info(f"[GMAIL] Skipping self-sent message from desk ({sender}) in fallback inbox list.")
-                    continue
-                messages_out.append(parsed)
-            except Exception as e:
-                logger.error(f"[GMAIL] Failed to fetch fallback message {msg_id}: {e}")
-                continue
-    except Exception as e:
-        logger.error(f"[GMAIL] Direct fallback to fetch recent inbox messages failed: {e}")
-
-    # Maintain cache bounds
-    if len(PROCESSED_GMAIL_MESSAGE_IDS) > 2000:
-        PROCESSED_GMAIL_MESSAGE_IDS = set(list(PROCESSED_GMAIL_MESSAGE_IDS)[-1000:])
 
     return messages_out
 
@@ -296,10 +255,6 @@ def send_gmail_reply(
     thread_subject: Optional[str] = None,
     thread_id: Optional[str] = None,
 ) -> bool:
-    """
-    Constructs an email.message.EmailMessage, sets threading headers,
-    URL-safe base64 encodes it, and sends it via users().messages().send().
-    """
     parsed_sub, body = parse_email_draft(raw_draft)
     to_addr = (to_email or "").strip()
     if not to_addr:
