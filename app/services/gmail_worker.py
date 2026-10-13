@@ -139,6 +139,8 @@ def _resolve_deal_counterparties(camp: Campaign, sender: str, desk_emails: set[s
     return buyer_name, target_buyer_email, supp_name, supp_email
 
 
+from app.schemas import AuditTranscriptEntry
+
 def _append_worker_audit_and_transcript(
     state: dict,
     db: Session,
@@ -157,18 +159,17 @@ def _append_worker_audit_and_transcript(
 ) -> None:
     if "audit_transcript" not in state or state["audit_transcript"] is None:
         state["audit_transcript"] = []
-    entry = {
-        "turn": turn,
-        "sender": sender,
-        "recipient": recipient,
-        "role": role,
-        "action": action,
-        "subject": subject,
-        "message": message,
-    }
-    if msg_id:
-        entry["id"] = msg_id
-    state["audit_transcript"].append(entry)
+    entry = AuditTranscriptEntry(
+        turn=turn,
+        sender=sender,
+        recipient=recipient,
+        role=role,
+        action=action,
+        subject=subject,
+        message=message,
+        id=msg_id,
+    )
+    state["audit_transcript"].append(entry.model_dump(exclude_none=True))
     db.add(TradeAuditModel(
         campaign_id=camp_id,
         thread_id=camp_id,

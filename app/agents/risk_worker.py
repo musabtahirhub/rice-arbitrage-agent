@@ -8,6 +8,12 @@ from app.market import get_benchmark_rate, estimate_freight
 from app.math_engine import calculate_dynamic_bounds, evaluate_deal
 from app.models import Campaign, DealState, ParsedEmail
 from app.prompts import SUPPLIER_RFQ_PROMPT
+from app.schemas import (
+    EvaluateRiskUpdate,
+    FetchMarketDataUpdate,
+    ParsedBuyerTermsUpdate,
+    ParsedSupplierTermsUpdate,
+)
 from app.services.llm_service import _parse_email_content, generate_dynamic_llm_draft
 
 logger = get_logger("arbitrage_desk.workflow")
@@ -70,27 +76,37 @@ def _process_parsed_buyer_terms(
     desk_proposed_rate: float,
     config: Optional[RunnableConfig] = None,
 ) -> dict:
-    updates = {}
+    buyer_accepted = None
     if terms.is_acceptance or terms.intent == "ACCEPTANCE":
-        updates["buyer_accepted"] = True
+        buyer_accepted = True
         if terms.price_usd_per_mt <= 0.0:
             terms.price_usd_per_mt = desk_proposed_rate
 
-    updates["buyer_terms"] = terms
-    updates["pipeline_step"] = 2
+    pipeline_step = 2
+    target_fob_ceiling = None
+    supplier_draft = None
+
     logger.info(
         f"[WORKFLOW:Node 1] Ingested buyer terms: price=${terms.price_usd_per_mt:.2f}/MT, "
-        f"intent='{terms.intent}', buyer_accepted={updates.get('buyer_accepted', False)}"
+        f"intent='{terms.intent}', buyer_accepted={bool(buyer_accepted)}"
     )
 
     if not state.get("supplier_terms"):
         freight = state.get("freight_cost_usd") or estimate_freight(campaign.origin_port_default, campaign.destination_port)
         target_fob_ceiling, rfq_draft = _generate_initial_supplier_rfq(campaign, terms, freight, config=config)
-        updates["target_fob_ceiling"] = target_fob_ceiling
-        updates["pipeline_step"] = 3
-        updates["supplier_draft"] = rfq_draft
+        pipeline_step = 3
+        supplier_draft = rfq_draft
 
-    return updates
+    update = ParsedBuyerTermsUpdate(
+        buyer_terms=terms,
+        pipeline_step=pipeline_step,
+        buyer_accepted=buyer_accepted,
+        target_fob_ceiling=target_fob_ceiling,
+        supplier_draft=supplier_draft,
+    )
+    res = update.model_dump(exclude_none=True)
+    res["buyer_terms"] = terms
+    return res
 
 
 def _process_parsed_supplier_terms(terms: ParsedEmail) -> dict:
@@ -98,16 +114,21 @@ def _process_parsed_supplier_terms(terms: ParsedEmail) -> dict:
         f"[WORKFLOW:Node 1] Ingested supplier terms: price=${terms.price_usd_per_mt:.2f}/MT FOB, "
         f"port='{terms.port}', qty={terms.quantity_mt:,.0f}MT"
     )
-    return {
-        "supplier_terms": terms,
-        "pipeline_step": 3,
-    }
+    update = ParsedSupplierTermsUpdate(
+        supplier_terms=terms,
+        pipeline_step=3,
+    )
+    res = update.model_dump(exclude_none=True)
+    res["supplier_terms"] = terms
+    return res
 
 
 def parse_incoming_email_node(state: DealState, config: Optional[RunnableConfig] = None) -> dict:
     raw_email = state.get("latest_email", "")
     role = state.get("active_role", "buyer")
     campaign: Campaign = state["campaign"]
+    if isinstance(campaign, dict):
+        campaign = Campaign(**campaign)
 
     desk_proposed_rate = _resolve_desk_proposed_rate(state)
     deal_context = {
@@ -125,6 +146,8 @@ def parse_incoming_email_node(state: DealState, config: Optional[RunnableConfig]
 
 def fetch_market_data_node(state: DealState, config: Optional[RunnableConfig] = None) -> dict:
     campaign: Campaign = state["campaign"]
+    if isinstance(campaign, dict):
+        campaign = Campaign(**campaign)
     benchmark_fob = get_benchmark_rate(campaign.commodity, campaign.broken_percentage)
     freight = estimate_freight(campaign.origin_port_default, campaign.destination_port)
 
@@ -136,18 +159,25 @@ def fetch_market_data_node(state: DealState, config: Optional[RunnableConfig] = 
         buffer_usd=campaign.buffer_usd_per_mt,
     )
 
-    return {
-        "benchmark_fob_usd": benchmark_fob,
-        "freight_cost_usd": freight,
-        "dynamic_fob_ceiling": bounds["dynamic_fob_ceiling"],
-        "dynamic_cif_floor": bounds["dynamic_cif_floor"],
-    }
+    update = FetchMarketDataUpdate(
+        benchmark_fob_usd=benchmark_fob,
+        freight_cost_usd=freight,
+        dynamic_fob_ceiling=bounds.dynamic_fob_ceiling,
+        dynamic_cif_floor=bounds.dynamic_cif_floor,
+    )
+    return update.model_dump()
 
 
 def evaluate_risk_node(state: DealState, config: Optional[RunnableConfig] = None) -> dict:
     campaign: Campaign = state["campaign"]
+    if isinstance(campaign, dict):
+        campaign = Campaign(**campaign)
     buyer = state.get("buyer_terms")
+    if isinstance(buyer, dict):
+        buyer = ParsedEmail(**buyer)
     supplier = state.get("supplier_terms")
+    if isinstance(supplier, dict):
+        supplier = ParsedEmail(**supplier)
     benchmark_fob = state.get("benchmark_fob_usd", 900.0)
     freight = state.get("freight_cost_usd", 50.0)
     curr_round = state.get("negotiation_round", 0) + 1
@@ -163,25 +193,26 @@ def evaluate_risk_node(state: DealState, config: Optional[RunnableConfig] = None
         buyer_accepted=buyer_accepted,
     )
 
-    action = result.get("action")
-    net_spread = result.get("net_spread", 0.0)
-    net_margin = result.get("net_margin_pct", 0.0)
-    reason = result.get("reason", "")
+    action = result.action
+    net_spread = result.net_spread
+    net_margin = result.net_margin_pct
+    reason = result.reason
 
     logger.info(
         f"[WORKFLOW:Node 3 Risk] Round {curr_round} Evaluation: action='{action}', "
-        f"viable={result['viable']}, net_spread=${net_spread:.2f}/MT, margin={net_margin:.2f}%, "
+        f"viable={result.viable}, net_spread=${net_spread:.2f}/MT, margin={net_margin:.2f}%, "
         f"reason='{reason}'"
     )
 
-    return {
-        "is_deal_viable": result["viable"],
-        "action": action,
-        "net_spread_usd": net_spread,
-        "net_margin_pct": net_margin,
-        "evaluation_reason": reason,
-        "negotiation_round": curr_round,
-    }
+    update = EvaluateRiskUpdate(
+        is_deal_viable=result.viable,
+        action=action,
+        net_spread_usd=net_spread,
+        net_margin_pct=net_margin,
+        evaluation_reason=reason,
+        negotiation_round=curr_round,
+    )
+    return update.model_dump()
 
 
 def route_after_evaluation(state: DealState) -> Literal["approval_gate", "confirm_deal", "counter_buyer", "counter_supplier", "reject_deal"]:

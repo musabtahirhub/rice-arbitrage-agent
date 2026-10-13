@@ -106,3 +106,29 @@ class SimulateTurnRequest(BaseModel):
     campaign_id: str
     sender_role: str
     raw_email: str
+
+
+# Re-export schemas for unified access
+from app.schemas import (  # noqa: E402
+    ApprovalResumeDecision,
+    ApprovalReviewPayload,
+    ApproveDealResponse,
+    AuditTranscriptEntry,
+    AutonomousRunnerResult,
+    CampaignStatusResponse,
+    ConfirmDealUpdate,
+    CounterBuyerUpdate,
+    CounterSupplierUpdate,
+    CreateCampaignResponse,
+    DealEvaluation,
+    DeskConfigResponse,
+    DynamicBounds,
+    EvaluateRiskUpdate,
+    FetchMarketDataUpdate,
+    NegotiateTurnResponse,
+    ParsedBuyerTermsUpdate,
+    ParsedSupplierTermsUpdate,
+    ProactiveOutreachUpdate,
+    RejectDealUpdate,
+    WebhookResponse,
+)

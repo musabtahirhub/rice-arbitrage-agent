@@ -5,6 +5,7 @@ from app.config import settings
 from app.logger import get_logger
 from app.models import Campaign, DealState, ParsedEmail
 from app.prompts import SUPPLIER_RFQ_PROMPT
+from app.schemas import CounterSupplierUpdate
 from app.services.llm_service import generate_dynamic_llm_draft
 
 logger = get_logger("arbitrage_desk.workflow")
@@ -78,7 +79,11 @@ def _build_counter_supplier_fallback(
 def counter_supplier_node(state: DealState, config: Optional[RunnableConfig] = None) -> dict:
     fob_ceiling = state.get("dynamic_fob_ceiling", 945.0)
     campaign: Campaign = state["campaign"]
+    if isinstance(campaign, dict):
+        campaign = Campaign(**campaign)
     supplier = state.get("supplier_terms")
+    if isinstance(supplier, dict):
+        supplier = ParsedEmail(**supplier)
     reason = state.get("evaluation_reason", "")
     curr_round = state.get("negotiation_round", 1)
     action = state.get("action")
@@ -96,7 +101,8 @@ def counter_supplier_node(state: DealState, config: Optional[RunnableConfig] = N
         f"countering supplier with target FOB ceiling USD {target_ceiling:.2f}/MT"
     )
 
-    return {
-        "deal_status": "counter_sent",
-        "supplier_draft": supplier_msg,
-    }
+    update = CounterSupplierUpdate(
+        deal_status="counter_sent",
+        supplier_draft=supplier_msg,
+    )
+    return update.model_dump()

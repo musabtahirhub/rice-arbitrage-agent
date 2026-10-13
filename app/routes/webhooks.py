@@ -30,13 +30,15 @@ def _extract_pubsub_history_id(body: dict) -> str:
         logger.error(f"[GMAIL WEBHOOK] Error decoding Pub/Sub data: {e}")
         return ""
 
+from app.schemas import WebhookResponse
+
 @router.post("/api/webhooks/gmail")
 async def gmail_webhook_endpoint(request: Request, background_tasks: BackgroundTasks):
     try:
         body = await request.json()
     except Exception as e:
         logger.error(f"[GMAIL WEBHOOK] Invalid JSON received: {e}")
-        return {"status": "error", "message": "Invalid JSON"}
+        return WebhookResponse(status="error", message="Invalid JSON").model_dump()
 
     history_id = _extract_pubsub_history_id(body)
     logger.info(f"[GMAIL WEBHOOK] Received Pub/Sub webhook notification. historyId: '{history_id}'")
@@ -44,4 +46,4 @@ async def gmail_webhook_endpoint(request: Request, background_tasks: BackgroundT
     if history_id:
         background_tasks.add_task(process_incoming_gmail_event, history_id)
 
-    return {"status": "ok", "historyId": history_id}
+    return WebhookResponse(status="ok", historyId=history_id).model_dump(exclude_none=True)

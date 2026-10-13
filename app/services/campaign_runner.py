@@ -16,6 +16,13 @@ from app.telemetry import get_langfuse_handler
 logger = setup_logger("arbitrage_desk")
 
 
+from app.schemas import (
+    ApprovalResumeDecision,
+    AuditTranscriptEntry,
+    AutonomousRunnerResult,
+)
+
+
 def _resolve_autonomous_counterparties(commodity: str) -> tuple:
     buyers = get_buyers_for_commodity(commodity)
     suppliers = get_suppliers_for_commodity(commodity)
@@ -32,15 +39,16 @@ def _resolve_autonomous_counterparties(commodity: str) -> tuple:
 
 def _ensure_initial_transcript(state: dict, campaign: Campaign, buyer_name: str, buyer_email: str) -> None:
     if "audit_transcript" not in state or not state["audit_transcript"]:
-        state["audit_transcript"] = [{
-            "turn": 0,
-            "sender": f"Trading Desk ({settings.desk_name})",
-            "recipient": f"{buyer_name} <{buyer_email}>",
-            "role": "agent",
-            "action": "OUTBOUND_SCO",
-            "subject": f"Soft Corporate Offer (SCO) — {campaign.commodity} CIF {campaign.destination_port}",
-            "message": state.get("buyer_draft", ""),
-        }]
+        entry = AuditTranscriptEntry(
+            turn=0,
+            sender=f"Trading Desk ({settings.desk_name})",
+            recipient=f"{buyer_name} <{buyer_email}>",
+            role="agent",
+            action="OUTBOUND_SCO",
+            subject=f"Soft Corporate Offer (SCO) — {campaign.commodity} CIF {campaign.destination_port}",
+            message=state.get("buyer_draft", ""),
+        )
+        state["audit_transcript"] = [entry.model_dump(exclude_none=True)]
 
 
 def _append_audit_and_transcript(
@@ -57,15 +65,16 @@ def _append_audit_and_transcript(
     direction: str,
     counterparty_price: Optional[float] = None,
 ) -> None:
-    state["audit_transcript"].append({
-        "turn": turn,
-        "sender": sender,
-        "recipient": recipient,
-        "role": role,
-        "action": action,
-        "subject": subject,
-        "message": message,
-    })
+    entry = AuditTranscriptEntry(
+        turn=turn,
+        sender=sender,
+        recipient=recipient,
+        role=role,
+        action=action,
+        subject=subject,
+        message=message,
+    )
+    state["audit_transcript"].append(entry.model_dump(exclude_none=True))
     db.add(TradeAuditModel(
         campaign_id=campaign_id,
         thread_id=campaign_id,
@@ -79,8 +88,9 @@ def _append_audit_and_transcript(
 def _resume_graph_if_awaiting_approval(state: dict, config: dict) -> dict:
     snapshot = app.workflow.get_trade_graph().get_state(config)
     if snapshot and snapshot.next and "approval_gate" in snapshot.next:
+        resume_payload = ApprovalResumeDecision(approved=True, reviewer_notes="Autonomous campaign auto-approval")
         return app.workflow.get_trade_graph().invoke(
-            Command(resume={"approved": True, "reviewer_notes": "Autonomous campaign auto-approval"}),
+            Command(resume=resume_payload.model_dump(exclude_none=True)),
             config=config,
         )
     return state
@@ -303,31 +313,32 @@ def _build_autonomous_runner_result(
 ) -> dict:
     buyer_t = state.get("buyer_terms")
     supp_t = state.get("supplier_terms")
-    return {
-        "campaign_id": campaign_id,
-        "commodity": campaign.commodity,
-        "deal_status": state.get("deal_status", "closed"),
-        "negotiation_rounds_completed": state.get("negotiation_round", 0),
-        "final_net_spread_usd": state.get("net_spread_usd", 0.0),
-        "final_net_margin_pct": state.get("net_margin_pct", 0.0),
-        "action": state.get("action", "ACCEPT_AND_CLOSE"),
-        "is_deal_viable": state.get("is_deal_viable", True),
-        "pipeline_step": state.get("pipeline_step", 4),
-        "evaluation_reason": state.get("evaluation_reason", ""),
-        "audit_transcript": state.get("audit_transcript", []),
-        "buyer_terms": buyer_t.model_dump() if buyer_t else None,
-        "supplier_terms": supp_t.model_dump() if supp_t else None,
-        "buyer_draft": state.get("buyer_draft"),
-        "supplier_draft": state.get("supplier_draft"),
-        "benchmark_fob_usd": state.get("benchmark_fob_usd"),
-        "freight_cost_usd": state.get("freight_cost_usd"),
-        "dynamic_fob_ceiling": state.get("dynamic_fob_ceiling"),
-        "dynamic_cif_floor": state.get("dynamic_cif_floor"),
-        "anchor_cif_usd": state.get("anchor_cif_usd"),
-        "discovered_buyers": [b.model_dump() for b in buyers],
-        "discovered_suppliers": [s.model_dump() for s in suppliers],
-        "status": state.get("deal_status", "closed"),
-    }
+    resp = AutonomousRunnerResult(
+        campaign_id=campaign_id,
+        commodity=campaign.commodity,
+        deal_status=state.get("deal_status", "closed"),
+        negotiation_rounds_completed=state.get("negotiation_round", 0),
+        final_net_spread_usd=state.get("net_spread_usd", 0.0),
+        final_net_margin_pct=state.get("net_margin_pct", 0.0),
+        action=state.get("action", "ACCEPT_AND_CLOSE"),
+        is_deal_viable=state.get("is_deal_viable", True),
+        pipeline_step=state.get("pipeline_step", 4),
+        evaluation_reason=state.get("evaluation_reason", ""),
+        audit_transcript=state.get("audit_transcript", []),
+        buyer_terms=buyer_t.model_dump() if buyer_t else None,
+        supplier_terms=supp_t.model_dump() if supp_t else None,
+        buyer_draft=state.get("buyer_draft"),
+        supplier_draft=state.get("supplier_draft"),
+        benchmark_fob_usd=state.get("benchmark_fob_usd"),
+        freight_cost_usd=state.get("freight_cost_usd"),
+        dynamic_fob_ceiling=state.get("dynamic_fob_ceiling"),
+        dynamic_cif_floor=state.get("dynamic_cif_floor"),
+        anchor_cif_usd=state.get("anchor_cif_usd"),
+        discovered_buyers=[b.model_dump() for b in buyers],
+        discovered_suppliers=[s.model_dump() for s in suppliers],
+        status=state.get("deal_status", "closed"),
+    )
+    return resp.model_dump()
 
 
 def run_full_autonomous_campaign(campaign_id: str, db: Optional[Session] = None) -> dict:

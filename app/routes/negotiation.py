@@ -73,26 +73,30 @@ def _record_outbound_turn_audit(req: SimulateTurnRequest, updated_state: dict, d
         db.add(outbound_audit)
 
 
+from app.schemas import ApproveDealResponse, NegotiateTurnResponse
+
+
 def _build_negotiate_turn_response(campaign_id: str, updated_state: dict) -> dict:
     buyer_t = updated_state.get("buyer_terms")
     supp_t = updated_state.get("supplier_terms")
-    return {
-        "campaign_id": campaign_id,
-        "negotiation_round": updated_state.get("negotiation_round", 1),
-        "deal_status": updated_state.get("deal_status"),
-        "action": updated_state.get("action"),
-        "pipeline_step": updated_state.get("pipeline_step", 1),
-        "is_deal_viable": updated_state.get("is_deal_viable"),
-        "net_spread_usd": updated_state.get("net_spread_usd", 0.0),
-        "net_margin_pct": updated_state.get("net_margin_pct"),
-        "evaluation_reason": updated_state.get("evaluation_reason"),
-        "target_fob_ceiling": updated_state.get("target_fob_ceiling", 0.0),
-        "buyer_terms": buyer_t.model_dump() if buyer_t else None,
-        "supplier_terms": supp_t.model_dump() if supp_t else None,
-        "buyer_draft": updated_state.get("buyer_draft"),
-        "supplier_draft": updated_state.get("supplier_draft"),
-        "audit_transcript": updated_state.get("audit_transcript", []),
-    }
+    resp = NegotiateTurnResponse(
+        campaign_id=campaign_id,
+        negotiation_round=updated_state.get("negotiation_round", 1),
+        deal_status=updated_state.get("deal_status"),
+        action=updated_state.get("action"),
+        pipeline_step=updated_state.get("pipeline_step", 1),
+        is_deal_viable=updated_state.get("is_deal_viable"),
+        net_spread_usd=updated_state.get("net_spread_usd", 0.0),
+        net_margin_pct=updated_state.get("net_margin_pct"),
+        evaluation_reason=updated_state.get("evaluation_reason"),
+        target_fob_ceiling=updated_state.get("target_fob_ceiling", 0.0),
+        buyer_terms=buyer_t.model_dump() if buyer_t else None,
+        supplier_terms=supp_t.model_dump() if supp_t else None,
+        buyer_draft=updated_state.get("buyer_draft"),
+        supplier_draft=updated_state.get("supplier_draft"),
+        audit_transcript=updated_state.get("audit_transcript", []),
+    )
+    return resp.model_dump()
 
 
 @router.post("/api/negotiate")
@@ -232,28 +236,29 @@ def _build_approve_deal_response(campaign_id: str, resumed_state: dict, buyer_ms
     trail = resumed_state.get("audit_transcript", [])
     buyer_t = resumed_state.get("buyer_terms")
     supp_t = resumed_state.get("supplier_terms")
-    return {
-        "campaign_id": campaign_id,
-        "deal_status": resumed_state.get("deal_status"),
-        "status": resumed_state.get("deal_status"),
-        "action": resumed_state.get("action"),
-        "deal_approved_by_human": resumed_state.get("deal_approved_by_human"),
-        "reviewer_notes": resumed_state.get("reviewer_notes"),
-        "override_cif_price": resumed_state.get("override_cif_price"),
-        "last_counter_cif_usd": resumed_state.get("last_counter_cif_usd"),
-        "evaluation_reason": resumed_state.get("evaluation_reason"),
-        "is_deal_viable": resumed_state.get("is_deal_viable"),
-        "net_spread_usd": resumed_state.get("net_spread_usd", 0.0),
-        "net_margin_pct": resumed_state.get("net_margin_pct"),
-        "pipeline_step": resumed_state.get("pipeline_step"),
-        "negotiation_round": resumed_state.get("negotiation_round"),
-        "buyer_terms": buyer_t.model_dump() if buyer_t else None,
-        "supplier_terms": supp_t.model_dump() if supp_t else None,
-        "buyer_draft": buyer_msg,
-        "supplier_draft": resumed_state.get("supplier_draft"),
-        "audit_transcript": trail,
-        "execution_trail": trail,
-    }
+    resp = ApproveDealResponse(
+        campaign_id=campaign_id,
+        deal_status=resumed_state.get("deal_status"),
+        status=resumed_state.get("deal_status"),
+        action=resumed_state.get("action"),
+        deal_approved_by_human=resumed_state.get("deal_approved_by_human"),
+        reviewer_notes=resumed_state.get("reviewer_notes"),
+        override_cif_price=resumed_state.get("override_cif_price"),
+        last_counter_cif_usd=resumed_state.get("last_counter_cif_usd"),
+        evaluation_reason=resumed_state.get("evaluation_reason"),
+        is_deal_viable=resumed_state.get("is_deal_viable"),
+        net_spread_usd=resumed_state.get("net_spread_usd", 0.0),
+        net_margin_pct=resumed_state.get("net_margin_pct"),
+        pipeline_step=resumed_state.get("pipeline_step"),
+        negotiation_round=resumed_state.get("negotiation_round"),
+        buyer_terms=buyer_t.model_dump() if buyer_t else None,
+        supplier_terms=supp_t.model_dump() if supp_t else None,
+        buyer_draft=buyer_msg,
+        supplier_draft=resumed_state.get("supplier_draft"),
+        audit_transcript=trail,
+        execution_trail=trail,
+    )
+    return resp.model_dump()
 
 
 @router.post("/api/campaigns/{campaign_id}/approve")

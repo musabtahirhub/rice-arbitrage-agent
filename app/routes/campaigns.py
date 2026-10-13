@@ -110,30 +110,39 @@ def _persist_outbound_audit_and_status(
     db.commit()
 
 
+from app.schemas import (
+    AuditTranscriptEntry,
+    CampaignStatusResponse,
+    CreateCampaignResponse,
+    DeskConfigResponse,
+)
+
+
 def _build_create_campaign_response(
     campaign_id: str,
     campaign: Campaign,
     launched_state: dict,
 ) -> dict:
-    return {
-        "campaign_id": campaign_id,
-        "commodity": campaign.commodity,
-        "benchmark_fob_usd": launched_state.get("benchmark_fob_usd"),
-        "freight_cost_usd": launched_state.get("freight_cost_usd"),
-        "dynamic_fob_ceiling": launched_state.get("dynamic_fob_ceiling"),
-        "dynamic_cif_floor": launched_state.get("dynamic_cif_floor"),
-        "anchor_cif_usd": launched_state.get("anchor_cif_usd"),
-        "buyer_draft": launched_state.get("buyer_draft"),
-        "pipeline_step": launched_state.get("pipeline_step", 1),
-        "deal_status": launched_state.get("deal_status", "prospecting"),
-        "min_profit_per_mt_hard": campaign.min_profit_per_mt_hard,
-        "min_profit_per_mt_soft": campaign.min_profit_per_mt_soft,
-        "max_negotiation_rounds": campaign.max_negotiation_rounds,
-        "discovered_buyers": launched_state.get("discovered_buyers", []),
-        "discovered_suppliers": launched_state.get("discovered_suppliers", []),
-        "audit_transcript": launched_state.get("audit_transcript", []),
-        "status": "initialized",
-    }
+    resp = CreateCampaignResponse(
+        campaign_id=campaign_id,
+        commodity=campaign.commodity,
+        benchmark_fob_usd=launched_state.get("benchmark_fob_usd"),
+        freight_cost_usd=launched_state.get("freight_cost_usd"),
+        dynamic_fob_ceiling=launched_state.get("dynamic_fob_ceiling"),
+        dynamic_cif_floor=launched_state.get("dynamic_cif_floor"),
+        anchor_cif_usd=launched_state.get("anchor_cif_usd"),
+        buyer_draft=launched_state.get("buyer_draft"),
+        pipeline_step=launched_state.get("pipeline_step", 1),
+        deal_status=launched_state.get("deal_status", "prospecting"),
+        min_profit_per_mt_hard=campaign.min_profit_per_mt_hard,
+        min_profit_per_mt_soft=campaign.min_profit_per_mt_soft,
+        max_negotiation_rounds=campaign.max_negotiation_rounds,
+        discovered_buyers=launched_state.get("discovered_buyers", []),
+        discovered_suppliers=launched_state.get("discovered_suppliers", []),
+        audit_transcript=launched_state.get("audit_transcript", []),
+        status="initialized",
+    )
+    return resp.model_dump()
 
 
 @router.post("/api/campaigns")
@@ -182,14 +191,15 @@ def _load_or_reconstruct_transcript(state: dict, campaign_id: str, db: Session) 
     )
     fallback_transcript = []
     for a in audits:
-        fallback_transcript.append({
-            "turn": 0,
-            "sender": a.role,
-            "recipient": "trading_desk",
-            "role": a.role,
-            "action": a.direction,
-            "message": a.raw_message,
-        })
+        entry = AuditTranscriptEntry(
+            turn=0,
+            sender=a.role,
+            recipient="trading_desk",
+            role=a.role,
+            action=a.direction,
+            message=a.raw_message or "",
+        )
+        fallback_transcript.append(entry.model_dump(exclude_none=True))
     return fallback_transcript
 
 
@@ -209,36 +219,37 @@ def _build_campaign_status_payload(
     buyer_t = state.get("buyer_terms")
     supp_t = state.get("supplier_terms")
 
-    return {
-        "campaign_id": campaign_id,
-        "commodity": commodity,
-        "target_margin_pct": target_margin_pct,
-        "min_profit_per_mt_hard": min_profit_per_mt_hard,
-        "min_profit_per_mt_soft": min_profit_per_mt_soft,
-        "max_negotiation_rounds": max_negotiation_rounds,
-        "negotiation_round": state.get("negotiation_round", 0),
-        "negotiation_rounds_completed": state.get("negotiation_round", 0),
-        "deal_status": state.get("deal_status", db_camp.deal_status),
-        "action": state.get("action"),
-        "pipeline_step": state.get("pipeline_step", 1),
-        "is_deal_viable": state.get("is_deal_viable"),
-        "net_spread_usd": state.get("net_spread_usd", 0.0),
-        "final_net_spread_usd": state.get("net_spread_usd", 0.0),
-        "net_margin_pct": state.get("net_margin_pct"),
-        "final_net_margin_pct": state.get("net_margin_pct"),
-        "evaluation_reason": state.get("evaluation_reason"),
-        "dynamic_fob_ceiling": state.get("dynamic_fob_ceiling"),
-        "dynamic_cif_floor": state.get("dynamic_cif_floor"),
-        "target_fob_ceiling": state.get("target_fob_ceiling", 0.0),
-        "anchor_cif_usd": state.get("anchor_cif_usd", db_camp.anchor_cif_usd or 0.0),
-        "benchmark_fob_usd": state.get("benchmark_fob_usd"),
-        "freight_cost_usd": state.get("freight_cost_usd"),
-        "buyer_terms": buyer_t.model_dump() if buyer_t else None,
-        "supplier_terms": supp_t.model_dump() if supp_t else None,
-        "buyer_draft": state.get("buyer_draft"),
-        "supplier_draft": state.get("supplier_draft"),
-        "audit_transcript": audit_transcript,
-    }
+    resp = CampaignStatusResponse(
+        campaign_id=campaign_id,
+        commodity=commodity,
+        target_margin_pct=target_margin_pct,
+        min_profit_per_mt_hard=min_profit_per_mt_hard,
+        min_profit_per_mt_soft=min_profit_per_mt_soft,
+        max_negotiation_rounds=max_negotiation_rounds,
+        negotiation_round=state.get("negotiation_round", 0),
+        negotiation_rounds_completed=state.get("negotiation_round", 0),
+        deal_status=state.get("deal_status", db_camp.deal_status),
+        action=state.get("action"),
+        pipeline_step=state.get("pipeline_step", 1),
+        is_deal_viable=state.get("is_deal_viable"),
+        net_spread_usd=state.get("net_spread_usd", 0.0),
+        final_net_spread_usd=state.get("net_spread_usd", 0.0),
+        net_margin_pct=state.get("net_margin_pct"),
+        final_net_margin_pct=state.get("net_margin_pct"),
+        evaluation_reason=state.get("evaluation_reason"),
+        dynamic_fob_ceiling=state.get("dynamic_fob_ceiling"),
+        dynamic_cif_floor=state.get("dynamic_cif_floor"),
+        target_fob_ceiling=state.get("target_fob_ceiling", 0.0),
+        anchor_cif_usd=state.get("anchor_cif_usd", db_camp.anchor_cif_usd or 0.0),
+        benchmark_fob_usd=state.get("benchmark_fob_usd"),
+        freight_cost_usd=state.get("freight_cost_usd"),
+        buyer_terms=buyer_t.model_dump() if buyer_t else None,
+        supplier_terms=supp_t.model_dump() if supp_t else None,
+        buyer_draft=state.get("buyer_draft"),
+        supplier_draft=state.get("supplier_draft"),
+        audit_transcript=audit_transcript,
+    )
+    return resp.model_dump()
 
 
 @router.get("/api/campaigns/{campaign_id}")
@@ -257,22 +268,24 @@ def get_campaign_status(campaign_id: str, db: Session = Depends(get_db)):
 
 @router.get("/api/config")
 def get_desk_config():
-    return {
-        "desk_name": settings.desk_name,
-        "desk_email": settings.desk_email,
-        "default_commodity": settings.default_commodity,
-        "default_target_volume_mt": settings.default_target_volume_mt,
-        "default_target_margin_pct": settings.default_target_margin_pct,
-        "default_max_variance_pct": settings.default_max_variance_pct,
-        "default_buffer_usd_per_mt": settings.default_buffer_usd_per_mt,
-        "default_destination_port": settings.default_destination_port,
-        "default_origin_port": settings.default_origin_port,
-        "default_payment_terms": settings.default_payment_terms,
-        "default_broken_percentage": settings.default_broken_percentage,
-        "min_profit_per_mt_hard": settings.default_min_profit_per_mt_hard,
-        "min_profit_per_mt_soft": settings.default_min_profit_per_mt_soft,
-        "max_negotiation_rounds": settings.default_max_negotiation_rounds,
-    }
+    resp = DeskConfigResponse(
+        desk_name=settings.desk_name,
+        desk_email=settings.desk_email,
+        default_commodity=settings.default_commodity,
+        default_target_volume_mt=settings.default_target_volume_mt,
+        default_target_margin_pct=settings.default_target_margin_pct,
+        default_max_variance_pct=settings.default_max_variance_pct,
+        default_buffer_usd_per_mt=settings.default_buffer_usd_per_mt,
+        default_destination_port=settings.default_destination_port,
+        default_origin_port=settings.default_origin_port,
+        default_payment_terms=settings.default_payment_terms,
+        default_broken_percentage=settings.default_broken_percentage,
+        min_profit_per_mt_hard=settings.default_min_profit_per_mt_hard,
+        min_profit_per_mt_soft=settings.default_min_profit_per_mt_soft,
+        max_negotiation_rounds=settings.default_max_negotiation_rounds,
+    )
+    return resp.model_dump()
+
 
 @router.get("/")
 def serve_index():

@@ -10,6 +10,12 @@ from app.market import get_benchmark_rate, estimate_freight
 from app.math_engine import calculate_dynamic_bounds
 from app.models import Campaign, DealState, ParsedEmail
 from app.prompts import BUYER_COUNTER_PROMPT
+from app.schemas import (
+    AuditTranscriptEntry,
+    CounterBuyerUpdate,
+    DynamicBounds,
+    ProactiveOutreachUpdate,
+)
 from app.services.llm_service import (
     split_subject_and_body,
     generate_dynamic_llm_draft,
@@ -43,7 +49,7 @@ def _calculate_pricing_parameters(
     state: DealState,
     origin_port: str,
     dest_port: str,
-) -> tuple[float, float, dict, float]:
+) -> tuple[float, float, DynamicBounds, float]:
     benchmark_fob = state.get("benchmark_fob_usd") or get_benchmark_rate(campaign.commodity, campaign.broken_percentage)
     freight = state.get("freight_cost_usd") or estimate_freight(origin_port, dest_port)
     buffer_usd = campaign.buffer_usd_per_mt if campaign.buffer_usd_per_mt is not None else settings.default_buffer_usd_per_mt
@@ -77,7 +83,6 @@ def _dispatch_sco_email_if_needed(
 ) -> None:
     if state.get("skip_email_dispatch", False) or not target_buyer_email:
         return
-
     send_email(
         to_email=target_buyer_email,
         raw_draft=initial_buyer_draft,
@@ -102,22 +107,23 @@ def _build_outreach_audit_entry(
     subject: str,
     draft: str,
 ) -> dict:
-    return {
-        "turn": 0,
-        "sender": f"Trading Desk ({settings.desk_name})",
-        "recipient": f"{buyer_name} <{target_email}>",
-        "role": "agent",
-        "action": "OUTBOUND_SCO",
-        "subject": subject,
-        "message": draft,
-    }
+    entry = AuditTranscriptEntry(
+        turn=0,
+        sender=f"Trading Desk ({settings.desk_name})",
+        recipient=f"{buyer_name} <{target_email}>",
+        role="agent",
+        action="OUTBOUND_SCO",
+        subject=subject,
+        message=draft,
+    )
+    return entry.model_dump(exclude_none=True)
 
 
 def _assemble_outreach_state(
     campaign: Campaign,
     benchmark_fob: float,
     freight: float,
-    bounds: dict,
+    bounds: DynamicBounds,
     anchor_cif: float,
     buyer_name: str,
     target_buyer_email: str,
@@ -128,37 +134,40 @@ def _assemble_outreach_state(
     suppliers: list,
     transcript: list,
 ) -> dict:
-    return {
-        "campaign": campaign,
-        "benchmark_fob_usd": benchmark_fob,
-        "freight_cost_usd": freight,
-        "dynamic_fob_ceiling": bounds["dynamic_fob_ceiling"],
-        "dynamic_cif_floor": bounds["dynamic_cif_floor"],
-        "target_fob_ceiling": 0.0,
-        "anchor_cif_usd": anchor_cif,
-        "buyer_terms": None,
-        "supplier_terms": None,
-        "negotiation_round": 0,
-        "deal_status": "prospecting",
-        "action": None,
-        "pipeline_step": 1,
-        "is_deal_viable": False,
-        "net_spread_usd": 0.0,
-        "net_margin_pct": 0.0,
-        "evaluation_reason": f"Proactive SCO dispatched to {buyer_name} at USD {anchor_cif:.2f}/MT CIF. Discovered {len(buyers)} buyers and {len(suppliers)} suppliers.",
-        "buyer_draft": initial_buyer_draft,
-        "supplier_draft": "",
-        "audit_transcript": transcript,
-        "thread_subject": sco_subject,
-        "last_buyer_message_id": sco_msg_id,
-        "buyer_references": sco_msg_id,
-        "last_supplier_message_id": None,
-        "supplier_references": None,
-        "discovered_buyers": [b.model_dump() for b in buyers],
-        "discovered_suppliers": [s.model_dump() for s in suppliers],
-        "target_buyer_email": target_buyer_email,
-        "target_buyer_name": buyer_name,
-    }
+    update = ProactiveOutreachUpdate(
+        campaign=campaign,
+        benchmark_fob_usd=benchmark_fob,
+        freight_cost_usd=freight,
+        dynamic_fob_ceiling=bounds.dynamic_fob_ceiling,
+        dynamic_cif_floor=bounds.dynamic_cif_floor,
+        target_fob_ceiling=0.0,
+        anchor_cif_usd=anchor_cif,
+        buyer_terms=None,
+        supplier_terms=None,
+        negotiation_round=0,
+        deal_status="prospecting",
+        action=None,
+        pipeline_step=1,
+        is_deal_viable=False,
+        net_spread_usd=0.0,
+        net_margin_pct=0.0,
+        evaluation_reason=f"Proactive SCO dispatched to {buyer_name} at USD {anchor_cif:.2f}/MT CIF. Discovered {len(buyers)} buyers and {len(suppliers)} suppliers.",
+        buyer_draft=initial_buyer_draft,
+        supplier_draft="",
+        audit_transcript=transcript,
+        thread_subject=sco_subject,
+        last_buyer_message_id=sco_msg_id,
+        buyer_references=sco_msg_id,
+        last_supplier_message_id=None,
+        supplier_references=None,
+        discovered_buyers=[b.model_dump() for b in buyers],
+        discovered_suppliers=[s.model_dump() for s in suppliers],
+        target_buyer_email=target_buyer_email,
+        target_buyer_name=buyer_name,
+    )
+    res = update.model_dump(exclude_none=True)
+    res["campaign"] = campaign
+    return res
 
 
 def proactive_outreach_node(state: DealState, config: Optional[RunnableConfig] = None) -> dict:
@@ -251,7 +260,11 @@ def _build_counter_buyer_fallback(
 def counter_buyer_node(state: DealState, config: Optional[RunnableConfig] = None) -> dict:
     cif_floor = state.get("dynamic_cif_floor", 1000.0)
     campaign: Campaign = state["campaign"]
+    if isinstance(campaign, dict):
+        campaign = Campaign(**campaign)
     buyer = state.get("buyer_terms")
+    if isinstance(buyer, dict):
+        buyer = ParsedEmail(**buyer)
     reason = state.get("evaluation_reason", "")
     curr_round = state.get("negotiation_round", 1)
     action = state.get("action")
@@ -281,8 +294,9 @@ def counter_buyer_node(state: DealState, config: Optional[RunnableConfig] = None
         f"countering buyer at USD {target_price:.2f}/MT CIF {campaign.destination_port} (Reason: {reason})"
     )
 
-    return {
-        "deal_status": "counter_sent",
-        "buyer_draft": buyer_msg,
-        "last_counter_cif_usd": target_price,
-    }
+    update = CounterBuyerUpdate(
+        deal_status="counter_sent",
+        buyer_draft=buyer_msg,
+        last_counter_cif_usd=target_price,
+    )
+    return update.model_dump()
