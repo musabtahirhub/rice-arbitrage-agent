@@ -1,6 +1,6 @@
 import json
 import re
-from typing import Optional
+from typing import Optional, Any
 
 from app.config import settings
 from app.logger import get_logger
@@ -58,7 +58,61 @@ def split_subject_and_body(raw_text: str, default_subject: str = "Trade Correspo
     return default_subject, raw
 
 
-def generate_dynamic_llm_draft(prompt: str, fallback_subject: str, fallback_body: str) -> str:
+def _extract_content_text(content: Any) -> str:
+    """Safely convert message content (str or list of parts) to a clean string."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict) and "text" in item:
+                parts.append(str(item["text"]))
+            elif hasattr(item, "text"):
+                parts.append(str(item.text))
+            else:
+                parts.append(str(item))
+        return "".join(parts)
+    return str(content) if content is not None else ""
+
+
+def _get_llm():
+    """Instantiate ChatGoogleGenerativeAI if gemini_api_key is set."""
+    if not settings.gemini_api_key:
+        return None
+    try:
+        from langchain_google_genai import ChatGoogleGenerativeAI
+        return ChatGoogleGenerativeAI(
+            model=settings.gemini_model,
+            google_api_key=settings.gemini_api_key,
+            temperature=settings.llm_temperature,
+        )
+    except Exception:
+        return None
+
+
+get_llm = _get_llm
+
+
+def generate_dynamic_llm_draft(
+    prompt: str,
+    fallback_subject: str,
+    fallback_body: str,
+    config: Optional[dict] = None,
+) -> str:
+    llm = _get_llm()
+    if llm:
+        try:
+            resp = llm.invoke(prompt, config=config)
+            content = _extract_content_text(resp.content if hasattr(resp, "content") else resp)
+            if content:
+                subject, body = split_subject_and_body(content, default_subject=fallback_subject)
+                if body:
+                    return f"Subject: {subject}\n\n{body}"
+        except Exception as exc:
+            logger.debug(f"[LLM DRAFT] LangChain invocation fallback: {exc}")
+
     if settings.gemini_api_key:
         try:
             import google.generativeai as genai
@@ -83,6 +137,7 @@ def generate_proactive_sco_draft(
     anchor_cif: float,
     buyer_name: str = "Procurement Partner",
     buyer_email: str = "procurement@domain.com",
+    config: Optional[dict] = None,
 ) -> str:
     prompt = PROACTIVE_COLD_SCO_PROMPT.format(
         desk_name=settings.desk_name,
@@ -107,7 +162,7 @@ def generate_proactive_sco_draft(
         f"Please reply with your target acceptance CIF level or counter-bid to secure shipment allocation.\n\n"
         f"Warm regards,\nTrading Desk, {settings.desk_name}"
     )
-    return generate_dynamic_llm_draft(prompt, fallback_sub, fallback_body)
+    return generate_dynamic_llm_draft(prompt, fallback_sub, fallback_body, config=config)
 
 
 def _extract_terms_via_gemini_llm(
@@ -116,9 +171,42 @@ def _extract_terms_via_gemini_llm(
     last_proposed_price: float,
     commodity: str,
     default_volume_mt: float,
+    config: Optional[dict] = None,
 ) -> Optional[ParsedEmail]:
     if not settings.gemini_api_key:
         return None
+
+    prompt = EMAIL_PARSER_PROMPT.format(
+        role=role,
+        last_proposed_price=last_proposed_price,
+        commodity=commodity,
+        default_volume_mt=default_volume_mt,
+        raw_email=raw_text,
+    )
+
+    llm = _get_llm()
+    if llm:
+        try:
+            resp = llm.invoke(prompt, config=config)
+            content = _extract_content_text(resp.content if hasattr(resp, "content") else resp)
+            clean_text = content.strip().removeprefix("```json").removesuffix("```").strip()
+            data = json.loads(clean_text)
+            if isinstance(data, dict):
+                data.setdefault("sender_role", role)
+            parsed = ParsedEmail(**data)
+            logger.info(
+                f"[LLM PARSER] Inbound email parsed for role='{role}': "
+                f"intent='{parsed.intent}', is_acceptance={parsed.is_acceptance}, "
+                f"price=${parsed.price_usd_per_mt:.2f}/MT, qty={parsed.quantity_mt:,.0f}MT, "
+                f"port='{parsed.port}', summary='{parsed.summary}'"
+            )
+            return parsed
+        except Exception as exc:
+            logger.warning(
+                f"[LLM PARSER] LangChain extraction issue ({exc.__class__.__name__}: {exc}). "
+                f"Trying direct SDK or regex fallback."
+            )
+
     try:
         import google.generativeai as genai
         genai.configure(api_key=settings.gemini_api_key)
@@ -126,16 +214,11 @@ def _extract_terms_via_gemini_llm(
             settings.gemini_model,
             generation_config={"temperature": settings.llm_temperature},
         )
-        prompt = EMAIL_PARSER_PROMPT.format(
-            role=role,
-            last_proposed_price=last_proposed_price,
-            commodity=commodity,
-            default_volume_mt=default_volume_mt,
-            raw_email=raw_text,
-        )
         resp = model.generate_content(prompt)
         clean_text = resp.text.strip().removeprefix("```json").removesuffix("```").strip()
         data = json.loads(clean_text)
+        if isinstance(data, dict):
+            data.setdefault("sender_role", role)
         parsed = ParsedEmail(**data)
         logger.info(
             f"[LLM PARSER] Inbound email parsed for role='{role}': "
@@ -221,14 +304,20 @@ def _extract_terms_via_regex_fallback(
     return fallback_parsed
 
 
-def _parse_email_content(raw_text: str, role: str, deal_context: Optional[dict] = None) -> ParsedEmail:
+def _parse_email_content(
+    raw_text: str,
+    role: str,
+    deal_context: Optional[dict] = None,
+    config: Optional[dict] = None,
+) -> ParsedEmail:
     ctx = deal_context or {}
     last_proposed_price = ctx.get("last_proposed_price", 1111.0)
     commodity = ctx.get("commodity", settings.default_commodity)
     default_volume_mt = ctx.get("default_volume_mt", settings.default_target_volume_mt)
+    cfg = config or ctx.get("config")
 
     llm_result = _extract_terms_via_gemini_llm(
-        raw_text, role, last_proposed_price, commodity, default_volume_mt
+        raw_text, role, last_proposed_price, commodity, default_volume_mt, config=cfg
     )
     if llm_result is not None:
         return llm_result
@@ -236,3 +325,4 @@ def _parse_email_content(raw_text: str, role: str, deal_context: Optional[dict] 
     return _extract_terms_via_regex_fallback(
         raw_text, role, last_proposed_price, commodity, default_volume_mt
     )
+

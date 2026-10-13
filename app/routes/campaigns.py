@@ -12,6 +12,7 @@ from app.directory import get_all_counterparties
 from app.models import Campaign, CreateCampaignRequest, DealState
 import app.workflow
 from app.services.campaign_runner import run_full_autonomous_campaign
+from app.telemetry import get_langfuse_handler
 
 logger = logging.getLogger("arbitrage_desk")
 
@@ -55,7 +56,7 @@ def _create_and_persist_campaign_models(req: CreateCampaignRequest, campaign_id:
     return campaign, db_campaign
 
 
-def _execute_initial_graph_step(campaign: Campaign) -> dict:
+def _execute_initial_graph_step(campaign: Campaign, langfuse_handler=None) -> dict:
     initial_state: DealState = {
         "campaign": campaign,
         "negotiation_round": 0,
@@ -73,7 +74,16 @@ def _execute_initial_graph_step(campaign: Campaign) -> dict:
         "supplier_draft": "",
         "audit_transcript": [],
     }
-    config = {"configurable": {"thread_id": campaign.campaign_id}}
+    config = {
+        "configurable": {"thread_id": campaign.campaign_id},
+        "callbacks": [langfuse_handler] if langfuse_handler else [],
+        "metadata": {
+            "campaign_id": campaign.campaign_id,
+            "commodity": campaign.commodity,
+            "target_volume_mt": campaign.target_volume_mt,
+        },
+        "tags": ["commodity-arbitrage", campaign.commodity],
+    }
     return app.workflow.get_trade_graph().invoke(initial_state, config=config)
 
 
@@ -128,6 +138,7 @@ def _build_create_campaign_response(
 
 @router.post("/api/campaigns")
 def create_campaign(req: CreateCampaignRequest, db: Session = Depends(get_db)):
+    langfuse_handler = get_langfuse_handler()
     campaign_id = f"CAMP-{uuid.uuid4().hex[:6].upper()}"
     logger.info(
         f"[CAMPAIGN CREATE] Received request for '{req.commodity}' ({req.target_volume_mt:,.0f} MT) "
@@ -135,7 +146,7 @@ def create_campaign(req: CreateCampaignRequest, db: Session = Depends(get_db)):
     )
 
     campaign, db_campaign = _create_and_persist_campaign_models(req, campaign_id, db)
-    launched_state = _execute_initial_graph_step(campaign)
+    launched_state = _execute_initial_graph_step(campaign, langfuse_handler=langfuse_handler)
     _persist_outbound_audit_and_status(campaign_id, db_campaign, launched_state, db)
 
     logger.info(
@@ -147,10 +158,15 @@ def create_campaign(req: CreateCampaignRequest, db: Session = Depends(get_db)):
     if req.auto_run:
         logger.info(f"[AUTONOMOUS CAMPAIGN] Auto-running campaign '{campaign_id}' through full negotiation lifecycle...")
         res = run_full_autonomous_campaign(campaign_id, db=db)
+        if langfuse_handler:
+            langfuse_handler.flush()
         logger.info(f"[AUTONOMOUS CAMPAIGN] Campaign '{campaign_id}' completed with status: {res.get('deal_status')}")
         return res
 
-    return _build_create_campaign_response(campaign_id, campaign, launched_state)
+    resp = _build_create_campaign_response(campaign_id, campaign, launched_state)
+    if langfuse_handler:
+        langfuse_handler.flush()
+    return resp
 
 
 def _load_or_reconstruct_transcript(state: dict, campaign_id: str, db: Session) -> list:

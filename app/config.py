@@ -15,6 +15,11 @@ class Settings(BaseSettings):
     gemini_model: str = "gemini-2.5-flash"
     llm_temperature: float = 0.2
 
+    # Langfuse Observability
+    langfuse_public_key: str = ""
+    langfuse_secret_key: str = ""
+    langfuse_host: str = "https://cloud.langfuse.com"
+
     smtp_server: str = "smtp.gmail.com"
     smtp_port: int = 587
     imap_server: str = "imap.gmail.com"

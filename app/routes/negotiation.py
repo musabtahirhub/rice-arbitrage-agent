@@ -11,6 +11,7 @@ from app.directory import get_buyers_for_commodity, get_suppliers_for_commodity
 import app.email_service as email_service
 from app.models import ApprovalPayload, SimulateTurnRequest
 import app.workflow
+from app.telemetry import get_langfuse_handler
 
 logger = logging.getLogger("arbitrage_desk")
 router = APIRouter()
@@ -102,7 +103,16 @@ def negotiate_turn(req: SimulateTurnRequest, db: Session = Depends(get_db)):
         logger.warning(f"[API NEGOTIATE] Campaign '{req.campaign_id}' not found in database.")
         raise HTTPException(status_code=404, detail=f"Campaign {req.campaign_id} not found.")
 
-    config = {"configurable": {"thread_id": req.campaign_id}}
+    langfuse_handler = get_langfuse_handler()
+    config = {
+        "configurable": {"thread_id": req.campaign_id},
+        "callbacks": [langfuse_handler] if langfuse_handler else [],
+        "metadata": {
+            "campaign_id": req.campaign_id,
+            "sender_role": req.sender_role,
+        },
+        "tags": ["commodity-arbitrage", "negotiation-turn"],
+    }
     snapshot = app.workflow.get_trade_graph().get_state(config)
     state = dict(snapshot.values) if snapshot and snapshot.values else {}
     if not state:
@@ -111,6 +121,8 @@ def negotiate_turn(req: SimulateTurnRequest, db: Session = Depends(get_db)):
 
     turn_state = _prepare_turn_state(state, req.raw_email, req.sender_role)
     updated_state = app.workflow.get_trade_graph().invoke(turn_state, config=config)
+    if langfuse_handler:
+        langfuse_handler.flush()
     _mark_pending_approval_if_needed(config, updated_state)
 
     _record_inbound_turn_audit(req, updated_state, db)
@@ -255,13 +267,25 @@ def approve_campaign_deal(campaign_id: str, payload: ApprovalPayload, db: Sessio
         logger.warning(f"[API APPROVE] Campaign '{campaign_id}' not found in database.")
         raise HTTPException(status_code=404, detail=f"Campaign {campaign_id} not found.")
 
-    config = {"configurable": {"thread_id": campaign_id}}
+    langfuse_handler = get_langfuse_handler()
+    config = {
+        "configurable": {"thread_id": campaign_id},
+        "callbacks": [langfuse_handler] if langfuse_handler else [],
+        "metadata": {
+            "action": "HITL_DECISION",
+            "approved": payload.approved,
+            "campaign_id": campaign_id,
+        },
+        "tags": ["commodity-arbitrage", "hitl-approval"],
+    }
     snapshot = app.workflow.get_trade_graph().get_state(config)
     if not snapshot or not snapshot.values:
         logger.warning(f"[API APPROVE] State for campaign '{campaign_id}' not found.")
         raise HTTPException(status_code=404, detail=f"State for campaign {campaign_id} not found.")
 
     resumed_state = app.workflow.get_trade_graph().invoke(Command(resume=payload.model_dump()), config=config)
+    if langfuse_handler:
+        langfuse_handler.flush()
 
     _dispatch_buyer_approval_email(resumed_state, db_camp)
     _dispatch_supplier_approval_email(resumed_state, db_camp)

@@ -1,4 +1,5 @@
 from typing import Optional
+from langchain_core.runnables import RunnableConfig
 from langgraph.types import Command, interrupt
 
 from app.config import settings
@@ -68,7 +69,7 @@ def _resolve_approval_command(decision: dict) -> Command:
     )
 
 
-def approval_gate_node(state: DealState):
+def approval_gate_node(state: DealState, config: Optional[RunnableConfig] = None):
     review_payload = _build_approval_review_payload(state)
     cid = review_payload["campaign_id"]
     comm = review_payload["commodity"]
@@ -93,7 +94,7 @@ def approval_gate_node(state: DealState):
     return _resolve_approval_command(decision)
 
 
-def _generate_supplier_lock_draft(campaign: Campaign, supplier: Optional[ParsedEmail]) -> str:
+def _generate_supplier_lock_draft(campaign: Campaign, supplier: Optional[ParsedEmail], config: Optional[RunnableConfig] = None) -> str:
     commodity = supplier.commodity if supplier else campaign.commodity
     quantity = supplier.quantity_mt if supplier else campaign.target_volume_mt
     price = supplier.price_usd_per_mt if supplier else 0.0
@@ -119,10 +120,10 @@ def _generate_supplier_lock_draft(campaign: Campaign, supplier: Optional[ParsedE
         f"Kindly issue the Proforma Invoice (PI) and banking coordinates.\n\n"
         f"Best regards,\n{settings.desk_name}"
     )
-    return generate_dynamic_llm_draft(supp_prompt, fallback_sub, fallback_body)
+    return generate_dynamic_llm_draft(supp_prompt, fallback_sub, fallback_body, config=config)
 
 
-def _generate_buyer_acceptance_draft(campaign: Campaign, buyer: Optional[ParsedEmail]) -> str:
+def _generate_buyer_acceptance_draft(campaign: Campaign, buyer: Optional[ParsedEmail], config: Optional[RunnableConfig] = None) -> str:
     commodity = buyer.commodity if buyer else campaign.commodity
     quantity = buyer.quantity_mt if buyer else campaign.target_volume_mt
     price = buyer.price_usd_per_mt if buyer else 0.0
@@ -148,16 +149,16 @@ def _generate_buyer_acceptance_draft(campaign: Campaign, buyer: Optional[ParsedE
         f"Our contract team will dispatch the formal SCO and draft LC instructions shortly.\n\n"
         f"Best regards,\n{settings.desk_name}"
     )
-    return generate_dynamic_llm_draft(buyer_prompt, fallback_sub, fallback_body)
+    return generate_dynamic_llm_draft(buyer_prompt, fallback_sub, fallback_body, config=config)
 
 
-def confirm_deal_node(state: DealState) -> dict:
+def confirm_deal_node(state: DealState, config: Optional[RunnableConfig] = None) -> dict:
     buyer = state.get("buyer_terms")
     supplier = state.get("supplier_terms")
     campaign: Campaign = state["campaign"]
 
-    supplier_msg = _generate_supplier_lock_draft(campaign, supplier)
-    buyer_msg = _generate_buyer_acceptance_draft(campaign, buyer)
+    supplier_msg = _generate_supplier_lock_draft(campaign, supplier, config=config)
+    buyer_msg = _generate_buyer_acceptance_draft(campaign, buyer, config=config)
 
     logger.info(
         f"[WORKFLOW:Node 4A Confirm] Deal viable & approved! "
@@ -182,7 +183,7 @@ def _resolve_rejected_offer_price(active_role: str, buyer: Optional[ParsedEmail]
     return 0.0
 
 
-def _generate_deal_decline_draft(campaign: Campaign, active_role: str, offered_price: float, reason: str) -> str:
+def _generate_deal_decline_draft(campaign: Campaign, active_role: str, offered_price: float, reason: str, config: Optional[RunnableConfig] = None) -> str:
     rej_prompt = DEAL_REJECTION_PROMPT.format(
         desk_name=settings.desk_name,
         recipient_role=active_role,
@@ -201,10 +202,10 @@ def _generate_deal_decline_draft(campaign: Campaign, active_role: str, offered_p
         f"We must respectfully decline this transaction under current pricing parameters.\n\n"
         f"Best regards,\nRisk & Arbitrage Desk, {settings.desk_name}"
     )
-    return generate_dynamic_llm_draft(rej_prompt, fallback_sub, fallback_body)
+    return generate_dynamic_llm_draft(rej_prompt, fallback_sub, fallback_body, config=config)
 
 
-def reject_deal_node(state: DealState) -> dict:
+def reject_deal_node(state: DealState, config: Optional[RunnableConfig] = None) -> dict:
     campaign: Campaign = state["campaign"]
     reason = state.get("evaluation_reason", "Spread does not satisfy minimum hard hurdle.")
     active_role = state.get("active_role", "buyer")
@@ -212,7 +213,7 @@ def reject_deal_node(state: DealState) -> dict:
     supplier = state.get("supplier_terms")
 
     offered_price = _resolve_rejected_offer_price(active_role, buyer, supplier)
-    decline_msg = _generate_deal_decline_draft(campaign, active_role, offered_price, reason)
+    decline_msg = _generate_deal_decline_draft(campaign, active_role, offered_price, reason, config=config)
 
     logger.warning(
         f"[WORKFLOW:Node 4D Reject] Deal rejected hard for role='{active_role}': "

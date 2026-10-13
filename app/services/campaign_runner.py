@@ -11,6 +11,7 @@ from app.directory import get_buyers_for_commodity, get_suppliers_for_commodity
 from app.models import Campaign
 import app.workflow
 from app.logger import setup_logger
+from app.telemetry import get_langfuse_handler
 
 logger = setup_logger("arbitrage_desk")
 
@@ -340,7 +341,16 @@ def run_full_autonomous_campaign(campaign_id: str, db: Optional[Session] = None)
         if not db_camp:
             raise HTTPException(status_code=404, detail=f"Campaign {campaign_id} not found.")
 
-        config = {"configurable": {"thread_id": campaign_id}}
+        langfuse_handler = get_langfuse_handler()
+        config = {
+            "configurable": {"thread_id": campaign_id},
+            "callbacks": [langfuse_handler] if langfuse_handler else [],
+            "metadata": {
+                "campaign_id": campaign_id,
+                "mode": "autonomous",
+            },
+            "tags": ["commodity-arbitrage", "autonomous"],
+        }
         snapshot = app.workflow.get_trade_graph().get_state(config)
         state = dict(snapshot.values) if snapshot and snapshot.values else {}
         if not state:
@@ -367,7 +377,10 @@ def run_full_autonomous_campaign(campaign_id: str, db: Optional[Session] = None)
         )
         _sync_final_graph_and_db_state(state, db_camp, config, db)
 
-        return _build_autonomous_runner_result(campaign_id, campaign, state, buyers, suppliers)
+        res = _build_autonomous_runner_result(campaign_id, campaign, state, buyers, suppliers)
+        if langfuse_handler:
+            langfuse_handler.flush()
+        return res
     finally:
         if should_close:
             db.close()

@@ -1,5 +1,6 @@
 import email.utils
 from typing import Optional
+from langchain_core.runnables import RunnableConfig
 
 from app.config import settings
 from app.directory import get_buyers_for_commodity, get_suppliers_for_commodity
@@ -160,7 +161,7 @@ def _assemble_outreach_state(
     }
 
 
-def proactive_outreach_node(state: DealState) -> dict:
+def proactive_outreach_node(state: DealState, config: Optional[RunnableConfig] = None) -> dict:
     campaign: Campaign = state["campaign"]
     if _is_outreach_already_active(state):
         logger.info(
@@ -179,6 +180,7 @@ def proactive_outreach_node(state: DealState) -> dict:
         anchor_cif=anchor_cif,
         buyer_name=buyer_name,
         buyer_email=target_buyer_email,
+        config=config,
     )
     sco_subject, _ = split_subject_and_body(
         initial_buyer_draft,
@@ -246,7 +248,7 @@ def _build_counter_buyer_fallback(
     return fallback_sub, fallback_body
 
 
-def counter_buyer_node(state: DealState) -> dict:
+def counter_buyer_node(state: DealState, config: Optional[RunnableConfig] = None) -> dict:
     cif_floor = state.get("dynamic_cif_floor", 1000.0)
     campaign: Campaign = state["campaign"]
     buyer = state.get("buyer_terms")
@@ -272,7 +274,7 @@ def counter_buyer_node(state: DealState) -> dict:
     fallback_sub, fallback_body = _build_counter_buyer_fallback(
         action, buyer, curr_round, campaign, target_price, cif_floor, reason
     )
-    buyer_msg = generate_dynamic_llm_draft(buyer_prompt, fallback_sub, fallback_body)
+    buyer_msg = generate_dynamic_llm_draft(buyer_prompt, fallback_sub, fallback_body, config=config)
 
     logger.info(
         f"[WORKFLOW:Node 4B Counter Buyer] Round {curr_round}: Action='{action}', "

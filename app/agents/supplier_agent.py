@@ -1,4 +1,5 @@
 from typing import Optional
+from langchain_core.runnables import RunnableConfig
 
 from app.config import settings
 from app.logger import get_logger
@@ -74,7 +75,7 @@ def _build_counter_supplier_fallback(
     return fallback_sub, fallback_body
 
 
-def counter_supplier_node(state: DealState) -> dict:
+def counter_supplier_node(state: DealState, config: Optional[RunnableConfig] = None) -> dict:
     fob_ceiling = state.get("dynamic_fob_ceiling", 945.0)
     campaign: Campaign = state["campaign"]
     supplier = state.get("supplier_terms")
@@ -88,7 +89,7 @@ def counter_supplier_node(state: DealState) -> dict:
         action, supplier, curr_round, campaign, target_ceiling, fob_ceiling, reason
     )
 
-    supplier_msg = generate_dynamic_llm_draft(supp_prompt, fallback_sub, fallback_body)
+    supplier_msg = generate_dynamic_llm_draft(supp_prompt, fallback_sub, fallback_body, config=config)
 
     logger.info(
         f"[WORKFLOW:Node 4C Counter Supplier] Round {curr_round}: Action='{action}', "

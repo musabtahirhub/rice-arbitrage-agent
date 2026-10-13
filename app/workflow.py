@@ -18,11 +18,15 @@ def __getattr__(name: str):
     if name == "checkpointer":
         return app.graph.get_checkpointer()
     raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
+from langchain_google_genai import ChatGoogleGenerativeAI
 from app.services.llm_service import (
+    _get_llm,
+    get_llm,
     generate_dynamic_llm_draft,
     generate_proactive_sco_draft,
     split_subject_and_body,
     _parse_email_content,
+    _extract_terms_via_gemini_llm,
 )
 from app.agents.buyer_agent import proactive_outreach_node, counter_buyer_node
 from app.agents.supplier_agent import counter_supplier_node

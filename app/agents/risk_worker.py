@@ -1,4 +1,5 @@
-from typing import Literal
+from typing import Literal, Optional
+from langchain_core.runnables import RunnableConfig
 
 from app.config import settings
 from app.directory import get_suppliers_for_commodity
@@ -25,6 +26,7 @@ def _generate_initial_supplier_rfq(
     campaign: Campaign,
     terms: ParsedEmail,
     freight: float,
+    config: Optional[RunnableConfig] = None,
 ) -> tuple[float, str]:
     buffer_usd = campaign.buffer_usd_per_mt if campaign.buffer_usd_per_mt is not None else settings.default_buffer_usd_per_mt
     target_fob_ceiling = round(terms.price_usd_per_mt - freight - buffer_usd - campaign.min_profit_per_mt_soft, 2)
@@ -57,7 +59,7 @@ def _generate_initial_supplier_rfq(
         f"Please confirm earliest shipping readiness and provide your quotation at or below USD {target_fob_ceiling:.2f}/MT FOB.\n\n"
         f"Best regards,\nProcurement Desk, {settings.desk_name}"
     )
-    draft = generate_dynamic_llm_draft(rfq_prompt, fallback_rfq_sub, fallback_rfq_body)
+    draft = generate_dynamic_llm_draft(rfq_prompt, fallback_rfq_sub, fallback_rfq_body, config=config)
     return target_fob_ceiling, draft
 
 
@@ -66,6 +68,7 @@ def _process_parsed_buyer_terms(
     state: DealState,
     campaign: Campaign,
     desk_proposed_rate: float,
+    config: Optional[RunnableConfig] = None,
 ) -> dict:
     updates = {}
     if terms.is_acceptance or terms.intent == "ACCEPTANCE":
@@ -82,7 +85,7 @@ def _process_parsed_buyer_terms(
 
     if not state.get("supplier_terms"):
         freight = state.get("freight_cost_usd") or estimate_freight(campaign.origin_port_default, campaign.destination_port)
-        target_fob_ceiling, rfq_draft = _generate_initial_supplier_rfq(campaign, terms, freight)
+        target_fob_ceiling, rfq_draft = _generate_initial_supplier_rfq(campaign, terms, freight, config=config)
         updates["target_fob_ceiling"] = target_fob_ceiling
         updates["pipeline_step"] = 3
         updates["supplier_draft"] = rfq_draft
@@ -101,7 +104,7 @@ def _process_parsed_supplier_terms(terms: ParsedEmail) -> dict:
     }
 
 
-def parse_incoming_email_node(state: DealState) -> dict:
+def parse_incoming_email_node(state: DealState, config: Optional[RunnableConfig] = None) -> dict:
     raw_email = state.get("latest_email", "")
     role = state.get("active_role", "buyer")
     campaign: Campaign = state["campaign"]
@@ -111,15 +114,16 @@ def parse_incoming_email_node(state: DealState) -> dict:
         "last_proposed_price": desk_proposed_rate,
         "commodity": campaign.commodity,
         "default_volume_mt": campaign.target_volume_mt,
+        "config": config,
     }
 
-    terms = _parse_email_content(raw_email, role, deal_context=deal_context)
+    terms = _parse_email_content(raw_email, role, deal_context=deal_context, config=config)
     if role == "buyer":
-        return _process_parsed_buyer_terms(terms, state, campaign, desk_proposed_rate)
+        return _process_parsed_buyer_terms(terms, state, campaign, desk_proposed_rate, config=config)
     return _process_parsed_supplier_terms(terms)
 
 
-def fetch_market_data_node(state: DealState) -> dict:
+def fetch_market_data_node(state: DealState, config: Optional[RunnableConfig] = None) -> dict:
     campaign: Campaign = state["campaign"]
     benchmark_fob = get_benchmark_rate(campaign.commodity, campaign.broken_percentage)
     freight = estimate_freight(campaign.origin_port_default, campaign.destination_port)
@@ -140,7 +144,7 @@ def fetch_market_data_node(state: DealState) -> dict:
     }
 
 
-def evaluate_risk_node(state: DealState) -> dict:
+def evaluate_risk_node(state: DealState, config: Optional[RunnableConfig] = None) -> dict:
     campaign: Campaign = state["campaign"]
     buyer = state.get("buyer_terms")
     supplier = state.get("supplier_terms")

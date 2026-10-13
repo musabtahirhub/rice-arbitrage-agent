@@ -26,6 +26,7 @@ from app.models import Campaign, ParsedEmail
 import app.workflow
 from app.workflow import split_subject_and_body
 from app.services.email_matcher import match_email_to_campaign
+from app.telemetry import get_langfuse_handler
 
 logger = logging.getLogger("arbitrage_desk")
 
@@ -71,7 +72,18 @@ def _prepare_campaign_graph_state(
     sub: str,
     thread_id: str,
 ) -> tuple[dict, dict]:
-    config = {"configurable": {"thread_id": db_camp.id}}
+    langfuse_handler = get_langfuse_handler()
+    config = {
+        "configurable": {"thread_id": db_camp.id},
+        "callbacks": [langfuse_handler] if langfuse_handler else [],
+        "metadata": {
+            "campaign_id": db_camp.id,
+            "commodity": db_camp.commodity,
+            "target_volume_mt": db_camp.target_volume_mt,
+            "source": "gmail_inbound",
+        },
+        "tags": ["commodity-arbitrage", db_camp.commodity, "gmail-inbound"],
+    }
     snapshot = app.workflow.get_trade_graph().get_state(config)
     state = dict(snapshot.values) if snapshot and snapshot.values else {}
     if "campaign" not in state:
@@ -368,6 +380,9 @@ def _process_inbound_message_transaction(
     _ensure_supplier_allocation(state, db_camp, supp_name, supp_email, db)
 
     updated_state = app.workflow.get_trade_graph().invoke(state, config=config)
+    langfuse_handler = get_langfuse_handler()
+    if langfuse_handler:
+        langfuse_handler.flush()
 
     snapshot = app.workflow.get_trade_graph().get_state(config)
     if snapshot and snapshot.next and "approval_gate" in snapshot.next:
