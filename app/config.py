@@ -1,6 +1,7 @@
-from typing import Union
-from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import field_validator
+import json
+from typing import Any
 
 
 class Settings(BaseSettings):
@@ -10,119 +11,101 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    gemini_api_key: str = Field(default="", validation_alias=AliasChoices("GEMINI_API_KEY", "GOOGLE_API_KEY"))
-    gemini_model: str = Field(default="gemini-2.5-flash", validation_alias=AliasChoices("GEMINI_MODEL", "LLM_MODEL"))
-    llm_temperature: float = Field(default=0.2, validation_alias=AliasChoices("LLM_TEMPERATURE", "TEMPERATURE"))
+    gemini_api_key: str = ""
+    gemini_model: str = "gemini-2.5-flash"
+    llm_temperature: float = 0.2
 
-    smtp_server: str = Field(default="smtp.gmail.com", validation_alias=AliasChoices("SMTP_SERVER", "EMAIL_SMTP_SERVER"))
-    smtp_port: int = Field(default=587, validation_alias=AliasChoices("SMTP_PORT", "EMAIL_SMTP_PORT"))
-    imap_server: str = Field(default="imap.gmail.com", validation_alias=AliasChoices("IMAP_SERVER", "EMAIL_IMAP_SERVER"))
-    email_user: str = Field(default="", validation_alias=AliasChoices("EMAIL_USER", "GMAIL_USER"))
-    email_pass: str = Field(default="", validation_alias=AliasChoices("EMAIL_PASS", "GMAIL_PASS"))
-    my_test_email: str = Field(default="", validation_alias=AliasChoices("MY_TEST_EMAIL", "TEST_BUYER_EMAIL"))
+    smtp_server: str = "smtp.gmail.com"
+    smtp_port: int = 587
+    imap_server: str = "imap.gmail.com"
+    email_user: str = ""
+    email_pass: str = ""
+    my_test_email: str = ""
+    email_poll_interval_seconds: int = 15
+    email_timeout_seconds: float = 30.0
+    imap_mailbox_folder: str = "INBOX"
 
-    google_pubsub_topic: str = Field(
-        default="",
-        validation_alias=AliasChoices("GOOGLE_PUBSUB_TOPIC", "PUBSUB_TOPIC"),
-    )
-    google_credentials_json_path: str = Field(
-        default="credentials.json",
-        validation_alias=AliasChoices("GOOGLE_CREDENTIALS_JSON_PATH", "CREDENTIALS_JSON_PATH"),
-    )
-    google_token_json_path: str = Field(
-        default="token.json",
-        validation_alias=AliasChoices("GOOGLE_TOKEN_JSON_PATH", "TOKEN_JSON_PATH"),
-    )
-    use_push_webhooks: bool = Field(
-        default=True,
-        validation_alias=AliasChoices("USE_PUSH_WEBHOOKS", "ENABLE_PUSH_WEBHOOKS"),
-    )
+    google_pubsub_topic: str = ""
+    google_credentials_json_path: str = "credentials.json"
+    google_token_json_path: str = "token.json"
+    use_push_webhooks: bool = True
 
-    port: int = Field(default=8000, validation_alias=AliasChoices("PORT", "DEFAULT_APP_PORT"))
-    host: str = Field(default="127.0.0.1", validation_alias=AliasChoices("HOST", "SERVER_HOST"))
-    cors_origins: Union[list[str], str] = Field(
-        default=["*"],
-        validation_alias=AliasChoices("CORS_ORIGINS", "ALLOWED_ORIGINS"),
-    )
-    database_url: str = Field(
-        default="postgresql://postgres:postgres@localhost:5432/arbitrage_desk",
-        validation_alias=AliasChoices("DATABASE_URL", "POSTGRES_URL"),
-    )
+    port: int = 8000
+    host: str = "127.0.0.1"
+    cors_origins: list[str] | str = ["*"]
+    database_url: str = "postgresql://postgres:postgres@localhost:5432/arbitrage_desk"
+    checkpointer_backend: str = "memory"
+    checkpointer_allow_volatile_fallback: bool = False
+    log_level: str = "INFO"
 
-    market_source_url: str = Field(
-        default="https://query1.finance.yahoo.com/v8/finance/chart/ZR=F?interval=1d&range=5d",
-        validation_alias=AliasChoices("MARKET_SOURCE_URL", "YAHOO_RICE_URL"),
-    )
-    market_cache_file: str = Field(
-        default="market_cache.json",
-        validation_alias=AliasChoices("MARKET_CACHE_FILE", "CACHE_FILE_PATH"),
-    )
-    market_cache_ttl_seconds: int = Field(
-        default=21600,
-        validation_alias=AliasChoices("MARKET_DATA_CACHE_TTL_SECONDS", "MARKET_CACHE_TTL"),
-    )
-    market_fetch_timeout_seconds: float = Field(
-        default=3.5,
-        validation_alias=AliasChoices("MARKET_FETCH_TIMEOUT_SECONDS", "MARKET_TIMEOUT"),
-    )
-    default_benchmark_rate: float = Field(
-        default=900.0,
-        validation_alias=AliasChoices("DEFAULT_BENCHMARK_RATE", "FALLBACK_BENCHMARK"),
-    )
-    default_freight_rate: float = Field(
-        default=50.0,
-        validation_alias=AliasChoices("DEFAULT_FREIGHT_RATE", "FALLBACK_FREIGHT"),
-    )
-    default_fuel_surcharge_pct: float = Field(
-        default=0.0,
-        validation_alias=AliasChoices("DEFAULT_FUEL_SURCHARGE_PCT", "FREIGHT_BAF_PCT"),
-    )
+    market_source_url: str = "https://query1.finance.yahoo.com/v8/finance/chart/ZR=F?interval=1d&range=5d"
+    market_cache_file: str = "market_cache.json"
+    market_cache_ttl_seconds: int = 21600
+    market_fetch_timeout_seconds: float = 3.5
+    default_benchmark_rate: float = 900.0
+    default_freight_rate: float = 50.0
+    default_fuel_surcharge_pct: float = 0.0
+    base_rough_rice_cwt_usd: float = 16.0
+    broken_penalty_rate: float = 0.005
+    broken_penalty_max_cap: float = 0.20
 
-    default_commodity: str = Field(
-        default="Basmati 1121",
-        validation_alias=AliasChoices("DEFAULT_COMMODITY", "COMMODITY"),
-    )
-    default_target_volume_mt: float = Field(
-        default=500.0,
-        validation_alias=AliasChoices("DEFAULT_TARGET_VOLUME_MT", "TARGET_VOLUME_MT"),
-    )
-    default_target_margin_pct: float = Field(
-        default=10.0,
-        validation_alias=AliasChoices("DEFAULT_TARGET_MARGIN_PCT", "TARGET_MARGIN_PCT"),
-    )
-    default_max_variance_pct: float = Field(
-        default=5.0,
-        validation_alias=AliasChoices("DEFAULT_MAX_VARIANCE_PCT", "MAX_VARIANCE_PCT"),
-    )
-    default_buffer_usd_per_mt: float = Field(
-        default=20.0,
-        validation_alias=AliasChoices("DEFAULT_BUFFER_USD_PER_MT", "BUFFER_USD_PER_MT"),
-    )
-    default_destination_port: str = Field(
-        default="Jebel Ali",
-        validation_alias=AliasChoices("DEFAULT_DESTINATION_PORT", "DESTINATION_PORT"),
-    )
-    default_origin_port: str = Field(
-        default="Karachi",
-        validation_alias=AliasChoices("DEFAULT_ORIGIN_PORT", "ORIGIN_PORT"),
-    )
-    default_payment_terms: str = Field(
-        default="100% LC at sight",
-        validation_alias=AliasChoices("DEFAULT_PAYMENT_TERMS", "PAYMENT_TERMS"),
-    )
-    default_broken_percentage: float = Field(
-        default=5.0,
-        validation_alias=AliasChoices("DEFAULT_BROKEN_PERCENTAGE", "BROKEN_PERCENTAGE"),
-    )
+    default_commodity: str = "Basmati 1121"
+    default_target_volume_mt: float = 500.0
+    default_target_margin_pct: float = 10.0
+    default_max_variance_pct: float = 5.0
+    default_buffer_usd_per_mt: float = 20.0
+    default_destination_port: str = "Jebel Ali"
+    default_origin_port: str = "Karachi"
+    default_payment_terms: str = "100% LC at sight"
+    default_broken_percentage: float = 5.0
 
-    desk_name: str = Field(
-        default="Global Agro Arbitrage Desk",
-        validation_alias=AliasChoices("DESK_NAME", "TRADING_DESK_NAME"),
-    )
-    desk_email: str = Field(
-        default="musabtahir2@gmail.com",
-        validation_alias=AliasChoices("DESK_EMAIL", "TRADING_DESK_EMAIL"),
-    )
+    default_min_profit_per_mt_hard: float = 50.0
+    default_min_profit_per_mt_soft: float = 120.0
+    default_max_negotiation_rounds: int = 3
+    sco_anchor_premium_usd_per_mt: float = 30.0
+    buyer_counter_step_usd_per_mt: float = 25.0
+    supplier_counter_step_usd_per_mt: float = 20.0
+
+    desk_name: str = "Global Agro Arbitrage Desk"
+    desk_email: str = "desk@arbitrage.com"
+
+    @field_validator("cors_origins", mode="before")
+    @classmethod
+    def assemble_cors_origins(cls, v: Any) -> list[str]:
+        """Parse comma-separated strings, JSON arrays, or lists into valid cors_origins."""
+        # 1. If unset (None), fallback to default wildcard
+        if v is None:
+            return ["*"]
+
+        # 2. String input handling
+        if isinstance(v, str):
+            v_trimmed = v.strip()
+            # Explicitly empty string -> allow no origins
+            if not v_trimmed:
+                return []
+
+            # JSON array format: '["http://localhost:3000"]'
+            if v_trimmed.startswith("[") and v_trimmed.endswith("]"):
+                try:
+                    parsed = json.loads(v_trimmed)
+                    if isinstance(parsed, list):
+                        return [str(x).strip() for x in parsed if str(x).strip()]
+                except Exception:
+                    pass
+
+            # Comma-separated format: "http://localhost:3000,https://app.com"
+            if "," in v_trimmed:
+                return [s.strip() for s in v_trimmed.split(",") if s.strip()]
+
+            # Single origin format: "http://localhost:3000" or "*"
+            return [v_trimmed]
+
+        # 3. List input handling (e.g. from Python code/tests)
+        elif isinstance(v, list):
+            return [str(x).strip() for x in v if str(x).strip()]
+
+        return []
+
     def __getattr__(self, name: str):
         lower_name = name.lower()
         try:

@@ -8,6 +8,28 @@ logger = logging.getLogger("arbitrage_desk")
 
 router = APIRouter()
 
+def _extract_pubsub_history_id(body: dict) -> str:
+    message = body.get("message") if isinstance(body, dict) else {}
+    if not isinstance(message, dict):
+        return ""
+    data_b64 = message.get("data", "")
+    if not data_b64:
+        return ""
+    try:
+        missing_padding = len(data_b64) % 4
+        if missing_padding:
+            data_b64 += "=" * (4 - missing_padding)
+        decoded_bytes = base64.b64decode(data_b64)
+        decoded_str = decoded_bytes.decode("utf-8")
+        try:
+            data_json = json.loads(decoded_str)
+            return str(data_json.get("historyId", ""))
+        except Exception:
+            return decoded_str.strip()
+    except Exception as e:
+        logger.error(f"[GMAIL WEBHOOK] Error decoding Pub/Sub data: {e}")
+        return ""
+
 @router.post("/api/webhooks/gmail")
 async def gmail_webhook_endpoint(request: Request, background_tasks: BackgroundTasks):
     try:
@@ -16,28 +38,7 @@ async def gmail_webhook_endpoint(request: Request, background_tasks: BackgroundT
         logger.error(f"[GMAIL WEBHOOK] Invalid JSON received: {e}")
         return {"status": "error", "message": "Invalid JSON"}
 
-    message = body.get("message") if isinstance(body, dict) else {}
-    if not isinstance(message, dict):
-        message = {}
-
-    data_b64 = message.get("data", "")
-    history_id = ""
-
-    if data_b64:
-        try:
-            missing_padding = len(data_b64) % 4
-            if missing_padding:
-                data_b64 += "=" * (4 - missing_padding)
-            decoded_bytes = base64.b64decode(data_b64)
-            decoded_str = decoded_bytes.decode("utf-8")
-            try:
-                data_json = json.loads(decoded_str)
-                history_id = str(data_json.get("historyId", ""))
-            except Exception:
-                history_id = decoded_str.strip()
-        except Exception as e:
-            logger.error(f"[GMAIL WEBHOOK] Error decoding Pub/Sub data: {e}")
-
+    history_id = _extract_pubsub_history_id(body)
     logger.info(f"[GMAIL WEBHOOK] Received Pub/Sub webhook notification. historyId: '{history_id}'")
 
     if history_id:

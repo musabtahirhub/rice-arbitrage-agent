@@ -1,0 +1,72 @@
+services:
+  # -------------------------------------------------------------
+  # 1. PostgreSQL Database (Relational Data & LangGraph Checkpointer)
+  # -------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: rice_arbitrage_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-arbitrage_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-arbitrage_secret_pass}
+      POSTGRES_DB: ${POSTGRES_DB:-rice_arbitrage}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-arbitrage_user} -d ${POSTGRES_DB:-rice_arbitrage}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # -------------------------------------------------------------
+  # 2. Database Migration Runner (Alembic)
+  # -------------------------------------------------------------
+  migrator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: rice_arbitrage_migrator
+    restart: "no"
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-arbitrage_user}:${POSTGRES_PASSWORD:-arbitrage_secret_pass}@postgres:5432/${POSTGRES_DB:-rice_arbitrage}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["alembic", "upgrade", "head"]
+
+  # -------------------------------------------------------------
+  # 3. FastAPI Arbitrage Agent
+  # -------------------------------------------------------------
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: rice_arbitrage_api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-arbitrage_user}:${POSTGRES_PASSWORD:-arbitrage_secret_pass}@postgres:5432/${POSTGRES_DB:-rice_arbitrage}
+      - CORS_ORIGINS=["*"]
+    volumes:
+      # Persist local scrapers cache and token storage
+      - cache_data:/app/.cache
+      # Mount credentials if using local OAuth files
+      - ./credentials.json:/app/credentials.json:ro
+      - ./token.json:/app/token.json:rw
+      - ./static:/app/static:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrator:
+        condition: service_completed_successfully
+
+volumes:
+  pgdata:
+    driver: local
+  cache_data:
+    driver: local

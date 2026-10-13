@@ -30,3 +30,4 @@ documentation.md
 
 credentials.json
 token.json
+.env.example

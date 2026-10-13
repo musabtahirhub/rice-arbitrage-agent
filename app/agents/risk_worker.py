@@ -12,17 +12,101 @@ from app.services.llm_service import _parse_email_content, generate_dynamic_llm_
 logger = get_logger("arbitrage_desk.workflow")
 
 
-def parse_incoming_email_node(state: DealState) -> dict:
-    raw_email = state.get("latest_email", "")
-    role = state.get("active_role", "buyer")
-    campaign: Campaign = state["campaign"]
-
-    desk_proposed_rate = (
+def _resolve_desk_proposed_rate(state: DealState) -> float:
+    return (
         state.get("last_counter_cif_usd")
         or state.get("dynamic_cif_floor")
         or state.get("anchor_cif_usd")
         or 1111.0
     )
+
+
+def _generate_initial_supplier_rfq(
+    campaign: Campaign,
+    terms: ParsedEmail,
+    freight: float,
+) -> tuple[float, str]:
+    buffer_usd = campaign.buffer_usd_per_mt if campaign.buffer_usd_per_mt is not None else settings.default_buffer_usd_per_mt
+    target_fob_ceiling = round(terms.price_usd_per_mt - freight - buffer_usd - campaign.min_profit_per_mt_soft, 2)
+
+    suppliers = get_suppliers_for_commodity(campaign.commodity)
+    target_supp = suppliers[0] if suppliers else None
+    supp_name = target_supp.name if target_supp else "Asian Rice Exporters"
+
+    rfq_prompt = SUPPLIER_RFQ_PROMPT.format(
+        desk_name=settings.desk_name,
+        supplier_name=supp_name,
+        origin_port=campaign.origin_port_default,
+        commodity=campaign.commodity,
+        broken_percentage=campaign.broken_percentage,
+        target_volume_mt=terms.quantity_mt,
+        fob_ceiling=target_fob_ceiling,
+        supplier_offered_text="None yet (Initial Sourcing RFQ)",
+        action="INITIAL_RFQ",
+        evaluation_reason=f"Active export enquiry from buyer at USD {terms.price_usd_per_mt:.2f}/MT CIF {campaign.destination_port}.",
+    )
+    fallback_rfq_sub = f"Urgent RFQ — {campaign.commodity} FOB {campaign.origin_port_default}"
+    fallback_rfq_body = (
+        f"Dear Export Team at {supp_name},\n\n"
+        f"We have an active firm export requirement for {terms.quantity_mt:,.0f} MT of {campaign.commodity} "
+        f"for shipment to {campaign.destination_port}.\n\n"
+        f"Our target acquisition ceiling for this volume is USD {target_fob_ceiling:.2f}/MT FOB {campaign.origin_port_default}.\n"
+        f"• Payment Terms: {settings.default_payment_terms}\n"
+        f"• Quality: Max {campaign.broken_percentage}% Broken grain\n"
+        f"• Volume: {terms.quantity_mt:,.0f} MT\n\n"
+        f"Please confirm earliest shipping readiness and provide your quotation at or below USD {target_fob_ceiling:.2f}/MT FOB.\n\n"
+        f"Best regards,\nProcurement Desk, {settings.desk_name}"
+    )
+    draft = generate_dynamic_llm_draft(rfq_prompt, fallback_rfq_sub, fallback_rfq_body)
+    return target_fob_ceiling, draft
+
+
+def _process_parsed_buyer_terms(
+    terms: ParsedEmail,
+    state: DealState,
+    campaign: Campaign,
+    desk_proposed_rate: float,
+) -> dict:
+    updates = {}
+    if terms.is_acceptance or terms.intent == "ACCEPTANCE":
+        updates["buyer_accepted"] = True
+        if terms.price_usd_per_mt <= 0.0:
+            terms.price_usd_per_mt = desk_proposed_rate
+
+    updates["buyer_terms"] = terms
+    updates["pipeline_step"] = 2
+    logger.info(
+        f"[WORKFLOW:Node 1] Ingested buyer terms: price=${terms.price_usd_per_mt:.2f}/MT, "
+        f"intent='{terms.intent}', buyer_accepted={updates.get('buyer_accepted', False)}"
+    )
+
+    if not state.get("supplier_terms"):
+        freight = state.get("freight_cost_usd") or estimate_freight(campaign.origin_port_default, campaign.destination_port)
+        target_fob_ceiling, rfq_draft = _generate_initial_supplier_rfq(campaign, terms, freight)
+        updates["target_fob_ceiling"] = target_fob_ceiling
+        updates["pipeline_step"] = 3
+        updates["supplier_draft"] = rfq_draft
+
+    return updates
+
+
+def _process_parsed_supplier_terms(terms: ParsedEmail) -> dict:
+    logger.info(
+        f"[WORKFLOW:Node 1] Ingested supplier terms: price=${terms.price_usd_per_mt:.2f}/MT FOB, "
+        f"port='{terms.port}', qty={terms.quantity_mt:,.0f}MT"
+    )
+    return {
+        "supplier_terms": terms,
+        "pipeline_step": 3,
+    }
+
+
+def parse_incoming_email_node(state: DealState) -> dict:
+    raw_email = state.get("latest_email", "")
+    role = state.get("active_role", "buyer")
+    campaign: Campaign = state["campaign"]
+
+    desk_proposed_rate = _resolve_desk_proposed_rate(state)
     deal_context = {
         "last_proposed_price": desk_proposed_rate,
         "commodity": campaign.commodity,
@@ -30,64 +114,9 @@ def parse_incoming_email_node(state: DealState) -> dict:
     }
 
     terms = _parse_email_content(raw_email, role, deal_context=deal_context)
-    updates = {}
     if role == "buyer":
-        if terms.is_acceptance or terms.intent == "ACCEPTANCE":
-            updates["buyer_accepted"] = True
-            if terms.price_usd_per_mt <= 0.0:
-                terms.price_usd_per_mt = desk_proposed_rate
-
-        updates["buyer_terms"] = terms
-        updates["pipeline_step"] = 2
-        logger.info(
-            f"[WORKFLOW:Node 1] Ingested buyer terms: price=${terms.price_usd_per_mt:.2f}/MT, "
-            f"intent='{terms.intent}', buyer_accepted={updates.get('buyer_accepted', False)}"
-        )
-        if not state.get("supplier_terms"):
-            freight = state.get("freight_cost_usd") or estimate_freight(campaign.origin_port_default, campaign.destination_port)
-            buffer_usd = campaign.buffer_usd_per_mt if campaign.buffer_usd_per_mt is not None else settings.default_buffer_usd_per_mt
-            target_fob_ceiling = round(terms.price_usd_per_mt - freight - buffer_usd - campaign.min_profit_per_mt_soft, 2)
-            updates["target_fob_ceiling"] = target_fob_ceiling
-            updates["pipeline_step"] = 3
-
-            suppliers = get_suppliers_for_commodity(campaign.commodity)
-            target_supp = suppliers[0] if suppliers else None
-            supp_name = target_supp.name if target_supp else "Asian Rice Exporters"
-
-            rfq_prompt = SUPPLIER_RFQ_PROMPT.format(
-                desk_name=settings.desk_name,
-                supplier_name=supp_name,
-                origin_port=campaign.origin_port_default,
-                commodity=campaign.commodity,
-                broken_percentage=campaign.broken_percentage,
-                target_volume_mt=terms.quantity_mt,
-                fob_ceiling=target_fob_ceiling,
-                supplier_offered_text="None yet (Initial Sourcing RFQ)",
-                action="INITIAL_RFQ",
-                evaluation_reason=f"Active export enquiry from buyer at USD {terms.price_usd_per_mt:.2f}/MT CIF {campaign.destination_port}.",
-            )
-            fallback_rfq_sub = f"Urgent RFQ — {campaign.commodity} FOB {campaign.origin_port_default}"
-            fallback_rfq_body = (
-                f"Dear Export Team at {supp_name},\n\n"
-                f"We have an active firm export requirement for {terms.quantity_mt:,.0f} MT of {campaign.commodity} "
-                f"for shipment to {campaign.destination_port}.\n\n"
-                f"Our target acquisition ceiling for this volume is USD {target_fob_ceiling:.2f}/MT FOB {campaign.origin_port_default}.\n"
-                f"• Payment Terms: {settings.default_payment_terms}\n"
-                f"• Quality: Max {campaign.broken_percentage}% Broken grain\n"
-                f"• Volume: {terms.quantity_mt:,.0f} MT\n\n"
-                f"Please confirm earliest shipping readiness and provide your quotation at or below USD {target_fob_ceiling:.2f}/MT FOB.\n\n"
-                f"Best regards,\nProcurement Desk, {settings.desk_name}"
-            )
-            updates["supplier_draft"] = generate_dynamic_llm_draft(rfq_prompt, fallback_rfq_sub, fallback_rfq_body)
-    else:
-        updates["supplier_terms"] = terms
-        updates["pipeline_step"] = 3
-        logger.info(
-            f"[WORKFLOW:Node 1] Ingested supplier terms: price=${terms.price_usd_per_mt:.2f}/MT FOB, "
-            f"port='{terms.port}', qty={terms.quantity_mt:,.0f}MT"
-        )
-
-    return updates
+        return _process_parsed_buyer_terms(terms, state, campaign, desk_proposed_rate)
+    return _process_parsed_supplier_terms(terms)
 
 
 def fetch_market_data_node(state: DealState) -> dict:
@@ -165,13 +194,11 @@ def route_after_evaluation(state: DealState) -> Literal["approval_gate", "confir
     if action == "COUNTER_TO_MAXIMIZE":
         if active_role == "buyer":
             return "counter_buyer"
-        else:
-            return "counter_supplier"
+        return "counter_supplier"
 
     if state.get("is_deal_viable") and has_supplier:
         return "approval_gate"
 
     if active_role == "buyer":
         return "counter_buyer"
-    else:
-        return "counter_supplier"
+    return "counter_supplier"

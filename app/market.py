@@ -44,7 +44,7 @@ DEFAULT_FREIGHT = settings.default_freight_rate
 YAHOO_RICE_URL = "https://query1.finance.yahoo.com/v8/finance/chart/ZR=F?interval=1d&range=5d"
 LIVE_URL = settings.market_source_url
 CWT_TO_MT_FACTOR = 22.046
-BASE_ROUGH_RICE_CWT = 16.0
+BASE_ROUGH_RICE_CWT = settings.base_rough_rice_cwt_usd
 
 
 def _load_cache() -> Optional[dict]:
@@ -80,7 +80,6 @@ def parse_yahoo_finance_json(data: dict) -> tuple[float, dict[str, float]]:
 
     cwt_price = float(cwt_price)
     rough_rice_usd_mt = round(cwt_price * CWT_TO_MT_FACTOR, 2)
-
     scale_ratio = cwt_price / BASE_ROUGH_RICE_CWT
 
     scaled_rates = {}
@@ -91,10 +90,44 @@ def parse_yahoo_finance_json(data: dict) -> tuple[float, dict[str, float]]:
     return rough_rice_usd_mt, scaled_rates
 
 
+def _extract_numeric_price_from_row(row) -> Optional[float]:
+    cells = [td.get_text(strip=True) for td in row.find_all("td")]
+    numeric_cells = [c for c in cells if re.match(r"^\d+(\.\d+)?$", c)]
+    if numeric_cells:
+        return float(numeric_cells[-1])
+    return None
+
+
+def _get_price_at_row_index(rows: list, row_idx: int) -> Optional[float]:
+    if row_idx >= len(rows):
+        return None
+    return _extract_numeric_price_from_row(rows[row_idx])
+
+
+def _extract_thai_rice_prices(rows: list) -> dict[str, float]:
+    extracted = {}
+    hom_mali = _get_price_at_row_index(rows, 1) or _get_price_at_row_index(rows, 2)
+    if hom_mali:
+        extracted["thai hom mali"] = hom_mali
+        extracted["jasmine rice"] = hom_mali
+
+    pathum = _get_price_at_row_index(rows, 3)
+    if pathum:
+        extracted["pathumthani fragrant"] = pathum
+
+    white_5 = _get_price_at_row_index(rows, 5)
+    if white_5:
+        extracted["thai white 5%"] = white_5
+
+    white_25 = _get_price_at_row_index(rows, 8)
+    if white_25:
+        extracted["thai white 25%"] = white_25
+
+    return extracted
+
+
 def parse_thai_rice_html(html_text: str) -> dict[str, float]:
     soup = BeautifulSoup(html_text, "html.parser")
-    extracted = {}
-
     for img in soup.find_all("img"):
         src = img.get("src", "")
         if "price_eng-1" in src:
@@ -105,34 +138,48 @@ def parse_thai_rice_html(html_text: str) -> dict[str, float]:
             if not tbody:
                 continue
             rows = tbody.find_all("tr")
+            return _extract_thai_rice_prices(rows)
+    return {}
 
-            def get_latest_price(row_idx: int) -> Optional[float]:
-                if row_idx >= len(rows):
-                    return None
-                cells = [td.get_text(strip=True) for td in rows[row_idx].find_all("td")]
-                numeric_cells = [c for c in cells if re.match(r"^\d+(\.\d+)?$", c)]
-                if numeric_cells:
-                    return float(numeric_cells[-1])
-                return None
 
-            hom_mali = get_latest_price(1) or get_latest_price(2)
-            if hom_mali:
-                extracted["thai hom mali"] = hom_mali
-                extracted["jasmine rice"] = hom_mali
+def _fetch_raw_market_http(target_url: str, timeout: float) -> Optional[httpx.Response]:
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+    try:
+        with httpx.Client(timeout=timeout, follow_redirects=True) as client:
+            resp = client.get(target_url, headers=headers)
+            if resp.status_code == 200:
+                return resp
+    except Exception as exc:
+        logger.warning(f"Could not fetch live market rates from {target_url} ({exc}). Using cached/baseline values.")
+    return None
 
-            pathum = get_latest_price(3)
-            if pathum:
-                extracted["pathumthani fragrant"] = pathum
 
-            white_5 = get_latest_price(5)
-            if white_5:
-                extracted["thai white 5%"] = white_5
+def _parse_market_http_response(resp: httpx.Response) -> tuple[dict[str, float], str]:
+    if "json" in resp.headers.get("content-type", "") or resp.text.strip().startswith("{"):
+        rough_price, live_rates = parse_yahoo_finance_json(resp.json())
+        if live_rates:
+            logger.info(f"Successfully fetched live rough rice benchmark from Yahoo Finance: ${rough_price}/MT")
+            return live_rates, f"live_yahoo_finance_cbot_zrf (${rough_price}/MT)"
+    else:
+        live_rates = parse_thai_rice_html(resp.text)
+        if live_rates:
+            return live_rates, "live_thairiceexporters_web"
+    return {}, "baseline_fallback"
 
-            white_25 = get_latest_price(8)
-            if white_25:
-                extracted["thai white 25%"] = white_25
 
-    return extracted
+def _persist_market_cache(rates: dict[str, float], source: str) -> None:
+    cache_payload = {
+        "timestamp": time.time(),
+        "source": source,
+        "rates": rates,
+        "freight_quotes": {},
+    }
+    existing = _load_cache()
+    if existing and "freight_quotes" in existing:
+        cache_payload["freight_quotes"] = existing["freight_quotes"]
+    _save_cache(cache_payload)
 
 
 def fetch_live_market_data(force_refresh: bool = False, timeout: Optional[float] = None) -> dict[str, float]:
@@ -144,89 +191,66 @@ def fetch_live_market_data(force_refresh: bool = False, timeout: Optional[float]
 
     rates = dict(STATIC_BENCHMARKS)
     source = "baseline_fallback"
-    target_url = LIVE_URL if "yahoo" in LIVE_URL else YAHOO_RICE_URL
+    target_url = LIVE_URL or YAHOO_RICE_URL
 
-    try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        }
-        with httpx.Client(timeout=timeout, follow_redirects=True) as client:
-            resp = client.get(target_url, headers=headers)
-            if resp.status_code == 200:
-                if "json" in resp.headers.get("content-type", "") or resp.text.strip().startswith("{"):
-                    rough_price, live_rates = parse_yahoo_finance_json(resp.json())
-                    if live_rates:
-                        rates.update(live_rates)
-                        source = f"live_yahoo_finance_cbot_zrf (${rough_price}/MT)"
-                        logger.info(f"Successfully fetched live rough rice benchmark from Yahoo Finance: ${rough_price}/MT")
-                else:
-                    live_rates = parse_thai_rice_html(resp.text)
-                    if live_rates:
-                        rates.update(live_rates)
-                        source = "live_thairiceexporters_web"
-    except Exception as exc:
-        logger.warning(f"Could not fetch live market rates from {target_url} ({exc}). Using cached/baseline values.")
+    resp = _fetch_raw_market_http(target_url, timeout)
+    if resp is not None:
+        parsed_rates, parsed_source = _parse_market_http_response(resp)
+        if parsed_rates:
+            rates.update(parsed_rates)
+            source = parsed_source
 
-    cache_payload = {
-        "timestamp": time.time(),
-        "source": source,
-        "rates": rates,
-        "freight_quotes": {},
-    }
-    existing = _load_cache()
-    if existing and "freight_quotes" in existing:
-        cache_payload["freight_quotes"] = existing["freight_quotes"]
-
-    _save_cache(cache_payload)
+    _persist_market_cache(rates, source)
     return rates
+
+
+def _lookup_commodity_price(rates: dict[str, float], commodity_key: str) -> float:
+    rate = rates.get(commodity_key)
+    if rate is not None:
+        return rate
+    for key, price in rates.items():
+        if key in commodity_key or commodity_key in key:
+            return price
+    return DEFAULT_BENCHMARK
+
+
+def _apply_broken_penalty(rate: float, broken_pct: float) -> float:
+    base_broken = settings.default_broken_percentage
+    if broken_pct <= base_broken:
+        return rate
+    penalty_factor = (broken_pct - base_broken) * settings.broken_penalty_rate
+    return rate * (1.0 - min(penalty_factor, settings.broken_penalty_max_cap))
 
 
 def get_benchmark_rate(commodity: str, broken_pct: float = 5.0) -> float:
     rates = fetch_live_market_data()
-    comm_key = commodity.lower().strip()
-
-    rate = rates.get(comm_key)
-    if rate is None:
-        for key, price in rates.items():
-            if key in comm_key or comm_key in key:
-                rate = price
-                break
-
-    if rate is None:
-        rate = DEFAULT_BENCHMARK
-
-    if broken_pct > 5.0:
-        penalty_factor = (broken_pct - 5.0) * 0.005
-        rate = rate * (1.0 - min(penalty_factor, 0.20))
-
-    return round(rate, 2)
+    commodity_key = commodity.lower().strip()
+    base_rate = _lookup_commodity_price(rates, commodity_key)
+    effective_rate = _apply_broken_penalty(base_rate, broken_pct)
+    return round(effective_rate, 2)
 
 
-def estimate_freight(origin_port: str, destination_port: str, fuel_surcharge_pct: Optional[float] = None) -> float:
-    if fuel_surcharge_pct is None:
-        fuel_surcharge_pct = settings.default_fuel_surcharge_pct
+def _resolve_base_freight_rate(origin_port: str, destination_port: str) -> float:
+    direct_match = (origin_port, destination_port)
+    if direct_match in BASE_FREIGHT_MATRIX:
+        return BASE_FREIGHT_MATRIX[direct_match]
+    for (orig_candidate, dest_candidate), rate in BASE_FREIGHT_MATRIX.items():
+        if orig_candidate in origin_port and dest_candidate in destination_port:
+            return rate
+    return DEFAULT_FREIGHT
 
-    orig = origin_port.lower().strip()
-    dest = destination_port.lower().strip()
 
-    base_rate = None
-    if (orig, dest) in BASE_FREIGHT_MATRIX:
-        base_rate = BASE_FREIGHT_MATRIX[(orig, dest)]
-    else:
-        for (o, d), rate in BASE_FREIGHT_MATRIX.items():
-            if o in orig and d in dest:
-                base_rate = rate
-                break
-
-    if base_rate is None:
-        base_rate = DEFAULT_FREIGHT
-
-    effective_freight = round(base_rate * (1.0 + fuel_surcharge_pct / 100.0), 2)
-
+def _record_freight_quote_cache(
+    origin_port: str,
+    destination_port: str,
+    base_rate: float,
+    fuel_surcharge_pct: float,
+    effective_freight: float,
+) -> None:
     cached = _load_cache() or {"timestamp": time.time(), "rates": BASELINE_BENCHMARKS, "freight_quotes": {}}
-    lane_key = f"{orig}->{dest}"
     if "freight_quotes" not in cached:
         cached["freight_quotes"] = {}
+    lane_key = f"{origin_port}->{destination_port}"
     cached["freight_quotes"][lane_key] = {
         "base_rate_usd": base_rate,
         "fuel_surcharge_pct": fuel_surcharge_pct,
@@ -235,4 +259,13 @@ def estimate_freight(origin_port: str, destination_port: str, fuel_surcharge_pct
     }
     _save_cache(cached)
 
+
+def estimate_freight(origin_port: str, destination_port: str, fuel_surcharge_pct: Optional[float] = None) -> float:
+    surcharge = fuel_surcharge_pct if fuel_surcharge_pct is not None else settings.default_fuel_surcharge_pct
+    orig = origin_port.lower().strip()
+    dest = destination_port.lower().strip()
+
+    base_rate = _resolve_base_freight_rate(orig, dest)
+    effective_freight = round(base_rate * (1.0 + surcharge / 100.0), 2)
+    _record_freight_quote_cache(orig, dest, base_rate, surcharge, effective_freight)
     return effective_freight

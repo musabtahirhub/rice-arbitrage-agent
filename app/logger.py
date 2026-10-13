@@ -1,8 +1,11 @@
 import logging
+from typing import Optional
 from logging.handlers import RotatingFileHandler
 import os
 from pathlib import Path
 import sys
+
+from app.config import settings
 
 LOGS_DIR = Path(__file__).resolve().parent.parent / "logs"
 LOG_FILE = LOGS_DIR / "arbitrage_desk.log"
@@ -10,8 +13,31 @@ LOG_FILE = LOGS_DIR / "arbitrage_desk.log"
 _CONFIGURED = False
 
 
-def setup_logger(name: str = "arbitrage_desk", level: int = logging.INFO) -> logging.Logger:
+def _build_console_handler(formatter: logging.Formatter, level: int) -> logging.Handler:
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(level)
+    console_handler.setFormatter(formatter)
+    return console_handler
+
+def _build_file_handler(formatter: logging.Formatter, level: int) -> logging.Handler | None:
+    try:
+        file_handler = RotatingFileHandler(
+            LOG_FILE,
+            maxBytes=10 * 1024 * 1024,
+            backupCount=5,
+            encoding="utf-8",
+        )
+        file_handler.setLevel(level)
+        file_handler.setFormatter(formatter)
+        return file_handler
+    except Exception as e:
+        return None
+
+def setup_logger(name: str = "arbitrage_desk", level: Optional[int] = None) -> logging.Logger:
     global _CONFIGURED
+
+    if level is None:
+        level = getattr(logging, (settings.log_level or "INFO").upper(), logging.INFO)
 
     parent_logger = logging.getLogger("arbitrage_desk")
     parent_logger.setLevel(level)
@@ -25,24 +51,13 @@ def setup_logger(name: str = "arbitrage_desk", level: int = logging.INFO) -> log
         )
 
         parent_logger.handlers.clear()
+        parent_logger.addHandler(_build_console_handler(formatter, level))
 
-        console_handler = logging.StreamHandler(sys.stdout)
-        console_handler.setLevel(level)
-        console_handler.setFormatter(formatter)
-        parent_logger.addHandler(console_handler)
-
-        try:
-            file_handler = RotatingFileHandler(
-                LOG_FILE,
-                maxBytes=10 * 1024 * 1024,
-                backupCount=5,
-                encoding="utf-8",
-            )
-            file_handler.setLevel(level)
-            file_handler.setFormatter(formatter)
-            parent_logger.addHandler(file_handler)
-        except Exception as e:
-            parent_logger.warning(f"Could not initialize file handler at {LOG_FILE}: {e}")
+        file_h = _build_file_handler(formatter, level)
+        if file_h:
+            parent_logger.addHandler(file_h)
+        else:
+            parent_logger.warning(f"Could not initialize file handler at {LOG_FILE}")
 
         parent_logger.propagate = False
         _CONFIGURED = True

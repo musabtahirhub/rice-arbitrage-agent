@@ -4,6 +4,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.graph import StateGraph, END
 
+from app.config import settings
 from app.database import pool
 from app.logger import get_logger
 from app.models import DealState
@@ -38,21 +39,71 @@ def route_entry_point(state: DealState) -> Literal["proactive_outreach", "parse_
     return "proactive_outreach"
 
 
-checkpointer = InMemorySaver()
+def _sync_workflow_exports(cp, graph):
+    import sys
+    wf = sys.modules.get("app.workflow")
+    if wf:
+        wf.checkpointer = cp
+        wf.trade_graph = graph
+
+
+def _initialize_checkpointer():
+    return InMemorySaver()
+
+
+checkpointer = _initialize_checkpointer()
+
+
+def get_checkpointer():
+    import sys
+    wf = sys.modules.get("app.workflow")
+    if wf and "checkpointer" in wf.__dict__ and wf.__dict__["checkpointer"] is not None:
+        return wf.__dict__["checkpointer"]
+    return globals().get("checkpointer")
+
+
+def get_trade_graph():
+    import sys
+    wf = sys.modules.get("app.workflow")
+    if wf and "trade_graph" in wf.__dict__ and wf.__dict__["trade_graph"] is not None:
+        return wf.__dict__["trade_graph"]
+    return globals().get("trade_graph")
 
 
 def setup_checkpointer():
-    try:
-        if hasattr(pool, "closed") and pool.closed:
-            pool.open()
-        if hasattr(checkpointer, "setup"):
-            checkpointer.setup()
+    global checkpointer, trade_graph
+    backend = getattr(settings, "checkpointer_backend", "memory").lower()
+    if backend == "postgres":
+        try:
+            if hasattr(pool, "closed") and pool.closed:
+                pool.open()
+            saver = PostgresSaver(pool)
+            saver.setup()
+            checkpointer = saver
+            trade_graph = build_trade_graph(checkpointer=checkpointer)
+            _sync_workflow_exports(checkpointer, trade_graph)
             logger.info("[CHECKPOINTER] Postgres checkpointer tables initialized/verified.")
-    except Exception as exc:
-        logger.warning(f"[CHECKPOINTER] Checkpointer setup notice or error: {exc}")
+            return checkpointer
+        except Exception as exc:
+            allow_fallback = getattr(settings, "checkpointer_allow_volatile_fallback", False)
+            if not allow_fallback:
+                logger.error(f"[CHECKPOINTER] PostgreSQL checkpointer setup failed and volatile fallback is disabled: {exc}")
+                raise RuntimeError(f"PostgreSQL checkpointer setup failed: {exc}") from exc
+            logger.warning(f"[CHECKPOINTER] Postgres checkpointer setup failed, falling back to InMemorySaver: {exc}")
+            checkpointer = InMemorySaver()
+            trade_graph = build_trade_graph(checkpointer=checkpointer)
+            _sync_workflow_exports(checkpointer, trade_graph)
+            return checkpointer
+
+    checkpointer = InMemorySaver()
+    trade_graph = build_trade_graph(checkpointer=checkpointer)
+    _sync_workflow_exports(checkpointer, trade_graph)
+    return checkpointer
 
 
-def build_trade_graph(checkpointer=checkpointer):
+def build_trade_graph(checkpointer=None):
+    if checkpointer is None:
+        checkpointer = get_checkpointer()
     builder = StateGraph(DealState)
 
     builder.add_node("proactive_outreach", proactive_outreach_node)
@@ -103,3 +154,11 @@ def build_trade_graph(checkpointer=checkpointer):
 
 build_arbitrage_graph = build_trade_graph
 trade_graph = build_trade_graph(checkpointer=checkpointer)
+
+
+def __getattr__(name: str):
+    if name == "trade_graph":
+        return get_trade_graph()
+    if name == "checkpointer":
+        return get_checkpointer()
+    raise AttributeError(f"module '{__name__}' has no attribute '{name}'")

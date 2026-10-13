@@ -12,7 +12,7 @@ from app.email_service import (
 from app.market import estimate_freight, get_benchmark_rate
 from app.math_engine import calculate_dynamic_bounds
 from app.models import Campaign, DealState, ParsedEmail
-from app.workflow import generate_proactive_sco_draft, trade_graph
+from app.workflow import generate_proactive_sco_draft, get_trade_graph
 
 
 def run_live_email_negotiation(recipient_email: str | None = None):
@@ -81,7 +81,7 @@ def run_live_email_negotiation(recipient_email: str | None = None):
         "target_buyer_name": "Institutional Procurement Partner",
     }
     config = {"configurable": {"thread_id": cid}}
-    state = trade_graph.invoke(initial_state, config=config)
+    state = get_trade_graph().invoke(initial_state, config=config)
 
     if state.get("supplier_terms") is None:
         state["supplier_terms"] = ParsedEmail(
@@ -144,7 +144,7 @@ def run_live_email_negotiation(recipient_email: str | None = None):
             state["active_role"] = "buyer"
 
             print("[LANGGRAPH] Evaluating math engine and invoking Gemini drafting node...")
-            state = trade_graph.invoke(state, config=config)
+            state = get_trade_graph().invoke(state, config=config)
 
             round_num = state.get("negotiation_round", 1)
             action = state.get("action")

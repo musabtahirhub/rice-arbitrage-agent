@@ -20,6 +20,39 @@ from app.routes.negotiation import router as negotiation_router
 
 logger = setup_logger("arbitrage_desk")
 
+async def _initialize_gmail_watch(topic: str):
+    logger.info(f"[LIFESPAN] Registering Gmail watch for topic: {topic}")
+    try:
+        watch_result = await asyncio.to_thread(setup_gmail_watch, topic)
+        if watch_result:
+            if "historyId" in watch_result:
+                gmail_worker.LAST_SEEN_HISTORY_ID = str(watch_result["historyId"])
+            logger.info(
+                f"[LIFESPAN] Gmail watch active! Expiration: {watch_result.get('expiration')}, "
+                f"initial historyId: {gmail_worker.LAST_SEEN_HISTORY_ID}"
+            )
+        else:
+            logger.error("[LIFESPAN ERROR] Failed to register Gmail watch.")
+    except Exception as e:
+        logger.error(f"[LIFESPAN] Failed to set up Gmail watch on boot: {e}")
+
+def _start_email_worker_if_configured():
+    if settings.email_user and settings.email_pass:
+        logger.info(f"[LIFESPAN] Email credentials configured ({settings.email_user}). Starting background email polling worker...")
+        return asyncio.create_task(email_polling_worker())
+    logger.warning("[LIFESPAN] Email credentials not configured (EMAIL_USER/EMAIL_PASS). Live email polling worker disabled.")
+    return None
+
+async def _shutdown_worker_task(worker_task):
+    if not worker_task:
+        return
+    logger.info("[LIFESPAN] Stopping background email polling worker...")
+    worker_task.cancel()
+    try:
+        await worker_task
+    except asyncio.CancelledError:
+        pass
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
@@ -29,38 +62,15 @@ async def lifespan(app: FastAPI):
     if settings.use_push_webhooks:
         topic = settings.google_pubsub_topic
         if topic:
-            logger.info(f"[LIFESPAN] Registering Gmail watch for topic: {topic}")
-            try:
-                watch_result = await asyncio.to_thread(setup_gmail_watch, topic)
-                if watch_result:
-                    if "historyId" in watch_result:
-                        gmail_worker.LAST_SEEN_HISTORY_ID = str(watch_result["historyId"])
-                    logger.info(
-                        f"[LIFESPAN] Gmail watch active! Expiration: {watch_result.get('expiration')}, "
-                        f"initial historyId: {gmail_worker.LAST_SEEN_HISTORY_ID}"
-                    )
-                else:
-                    logger.error("[LIFESPAN ERROR] Failed to register Gmail watch.")
-            except Exception as e:
-                logger.error(f"[LIFESPAN] Failed to set up Gmail watch on boot: {e}")
+            await _initialize_gmail_watch(topic)
         else:
             logger.info("[LIFESPAN] Push webhooks enabled (USE_PUSH_WEBHOOKS=True). Polling worker disabled.")
     else:
-        if settings.email_user and settings.email_pass:
-            logger.info(f"[LIFESPAN] Email credentials configured ({settings.email_user}). Starting background email polling worker...")
-            worker_task = asyncio.create_task(email_polling_worker())
-        else:
-            logger.warning("[LIFESPAN] Email credentials not configured (EMAIL_USER/EMAIL_PASS). Live email polling worker disabled.")
+        worker_task = _start_email_worker_if_configured()
 
     yield
 
-    if worker_task:
-        logger.info("[LIFESPAN] Stopping background email polling worker...")
-        worker_task.cancel()
-        try:
-            await worker_task
-        except asyncio.CancelledError:
-            pass
+    await _shutdown_worker_task(worker_task)
 
 
 app = FastAPI(
@@ -82,3 +92,9 @@ app.add_middleware(
 app.include_router(campaigns_router)
 app.include_router(webhooks_router)
 app.include_router(negotiation_router)
+
+STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
+if not STATIC_DIR.exists():
+    STATIC_DIR = Path(__file__).resolve().parent / "static"
+if STATIC_DIR.exists():
+    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")

@@ -27,13 +27,7 @@ def list_directory():
     return get_all_counterparties()
 
 
-@router.post("/api/campaigns")
-def create_campaign(req: CreateCampaignRequest, db: Session = Depends(get_db)):
-    campaign_id = f"CAMP-{uuid.uuid4().hex[:6].upper()}"
-    logger.info(
-        f"[CAMPAIGN CREATE] Received request for '{req.commodity}' ({req.target_volume_mt:,.0f} MT) "
-        f"-> Port: {req.destination_port} | Target Margin: {req.target_margin_pct}% | Auto-run: {req.auto_run}"
-    )
+def _create_and_persist_campaign_models(req: CreateCampaignRequest, campaign_id: str, db: Session) -> tuple[Campaign, CampaignModel]:
     campaign = Campaign(
         campaign_id=campaign_id,
         commodity=req.commodity,
@@ -58,7 +52,10 @@ def create_campaign(req: CreateCampaignRequest, db: Session = Depends(get_db)):
     db.add(db_campaign)
     db.commit()
     db.refresh(db_campaign)
+    return campaign, db_campaign
 
+
+def _execute_initial_graph_step(campaign: Campaign) -> dict:
     initial_state: DealState = {
         "campaign": campaign,
         "negotiation_round": 0,
@@ -76,10 +73,16 @@ def create_campaign(req: CreateCampaignRequest, db: Session = Depends(get_db)):
         "supplier_draft": "",
         "audit_transcript": [],
     }
-
     config = {"configurable": {"thread_id": campaign.campaign_id}}
-    launched_state = app.workflow.trade_graph.invoke(initial_state, config=config)
+    return app.workflow.get_trade_graph().invoke(initial_state, config=config)
 
+
+def _persist_outbound_audit_and_status(
+    campaign_id: str,
+    db_campaign: CampaignModel,
+    launched_state: dict,
+    db: Session,
+) -> None:
     db_campaign.deal_status = launched_state.get("deal_status", "prospecting")
     db_campaign.anchor_cif_usd = launched_state.get("anchor_cif_usd")
 
@@ -96,18 +99,12 @@ def create_campaign(req: CreateCampaignRequest, db: Session = Depends(get_db)):
         db.add(sco_audit)
     db.commit()
 
-    logger.info(
-        f"[CAMPAIGN CREATED] ID='{campaign_id}' | Benchmark FOB: ${launched_state.get('benchmark_fob_usd', 0.0):.2f}/MT | "
-        f"Freight: ${launched_state.get('freight_cost_usd', 0.0):.2f}/MT | Dynamic FOB Ceiling: ${launched_state.get('dynamic_fob_ceiling', 0.0):.2f}/MT | "
-        f"Anchor CIF: ${launched_state.get('anchor_cif_usd', 0.0):.2f}/MT"
-    )
 
-    if req.auto_run:
-        logger.info(f"[AUTONOMOUS CAMPAIGN] Auto-running campaign '{campaign_id}' through full negotiation lifecycle...")
-        res = run_full_autonomous_campaign(campaign_id, db=db)
-        logger.info(f"[AUTONOMOUS CAMPAIGN] Campaign '{campaign_id}' completed with status: {res.get('deal_status')}")
-        return res
-
+def _build_create_campaign_response(
+    campaign_id: str,
+    campaign: Campaign,
+    launched_state: dict,
+) -> dict:
     return {
         "campaign_id": campaign_id,
         "commodity": campaign.commodity,
@@ -129,15 +126,37 @@ def create_campaign(req: CreateCampaignRequest, db: Session = Depends(get_db)):
     }
 
 
-@router.get("/api/campaigns/{campaign_id}")
-def get_campaign_status(campaign_id: str, db: Session = Depends(get_db)):
-    db_camp = db.query(CampaignModel).filter(CampaignModel.id == campaign_id).first()
-    if not db_camp:
-        raise HTTPException(status_code=404, detail=f"Campaign {campaign_id} not found.")
+@router.post("/api/campaigns")
+def create_campaign(req: CreateCampaignRequest, db: Session = Depends(get_db)):
+    campaign_id = f"CAMP-{uuid.uuid4().hex[:6].upper()}"
+    logger.info(
+        f"[CAMPAIGN CREATE] Received request for '{req.commodity}' ({req.target_volume_mt:,.0f} MT) "
+        f"-> Port: {req.destination_port} | Target Margin: {req.target_margin_pct}% | Auto-run: {req.auto_run}"
+    )
 
-    config = {"configurable": {"thread_id": campaign_id}}
-    snapshot = app.workflow.trade_graph.get_state(config)
-    state = dict(snapshot.values) if snapshot and snapshot.values else {}
+    campaign, db_campaign = _create_and_persist_campaign_models(req, campaign_id, db)
+    launched_state = _execute_initial_graph_step(campaign)
+    _persist_outbound_audit_and_status(campaign_id, db_campaign, launched_state, db)
+
+    logger.info(
+        f"[CAMPAIGN CREATED] ID='{campaign_id}' | Benchmark FOB: ${launched_state.get('benchmark_fob_usd', 0.0):.2f}/MT | "
+        f"Freight: ${launched_state.get('freight_cost_usd', 0.0):.2f}/MT | Dynamic FOB Ceiling: ${launched_state.get('dynamic_fob_ceiling', 0.0):.2f}/MT | "
+        f"Anchor CIF: ${launched_state.get('anchor_cif_usd', 0.0):.2f}/MT"
+    )
+
+    if req.auto_run:
+        logger.info(f"[AUTONOMOUS CAMPAIGN] Auto-running campaign '{campaign_id}' through full negotiation lifecycle...")
+        res = run_full_autonomous_campaign(campaign_id, db=db)
+        logger.info(f"[AUTONOMOUS CAMPAIGN] Campaign '{campaign_id}' completed with status: {res.get('deal_status')}")
+        return res
+
+    return _build_create_campaign_response(campaign_id, campaign, launched_state)
+
+
+def _load_or_reconstruct_transcript(state: dict, campaign_id: str, db: Session) -> list:
+    audit_transcript = state.get("audit_transcript") or []
+    if audit_transcript:
+        return audit_transcript
 
     audits = (
         db.query(TradeAuditModel)
@@ -145,25 +164,31 @@ def get_campaign_status(campaign_id: str, db: Session = Depends(get_db)):
         .order_by(TradeAuditModel.id.asc())
         .all()
     )
+    fallback_transcript = []
+    for a in audits:
+        fallback_transcript.append({
+            "turn": 0,
+            "sender": a.role,
+            "recipient": "trading_desk",
+            "role": a.role,
+            "action": a.direction,
+            "message": a.raw_message,
+        })
+    return fallback_transcript
 
-    audit_transcript = state.get("audit_transcript") or []
-    if not audit_transcript and audits:
-        for a in audits:
-            audit_transcript.append({
-                "turn": 0,
-                "sender": a.role,
-                "recipient": "trading_desk",
-                "role": a.role,
-                "action": a.direction,
-                "message": a.raw_message,
-            })
 
+def _build_campaign_status_payload(
+    campaign_id: str,
+    db_camp: CampaignModel,
+    state: dict,
+    audit_transcript: list,
+) -> dict:
     campaign_obj = state.get("campaign")
     commodity = campaign_obj.commodity if campaign_obj else db_camp.commodity
     target_margin_pct = campaign_obj.target_margin_pct if campaign_obj else settings.default_target_margin_pct
-    min_profit_per_mt_hard = campaign_obj.min_profit_per_mt_hard if campaign_obj else 50.0
-    min_profit_per_mt_soft = campaign_obj.min_profit_per_mt_soft if campaign_obj else 120.0
-    max_negotiation_rounds = campaign_obj.max_negotiation_rounds if campaign_obj else 3
+    min_profit_per_mt_hard = campaign_obj.min_profit_per_mt_hard if campaign_obj else settings.default_min_profit_per_mt_hard
+    min_profit_per_mt_soft = campaign_obj.min_profit_per_mt_soft if campaign_obj else settings.default_min_profit_per_mt_soft
+    max_negotiation_rounds = campaign_obj.max_negotiation_rounds if campaign_obj else settings.default_max_negotiation_rounds
 
     buyer_t = state.get("buyer_terms")
     supp_t = state.get("supplier_terms")
@@ -199,6 +224,39 @@ def get_campaign_status(campaign_id: str, db: Session = Depends(get_db)):
         "audit_transcript": audit_transcript,
     }
 
+
+@router.get("/api/campaigns/{campaign_id}")
+def get_campaign_status(campaign_id: str, db: Session = Depends(get_db)):
+    db_camp = db.query(CampaignModel).filter(CampaignModel.id == campaign_id).first()
+    if not db_camp:
+        raise HTTPException(status_code=404, detail=f"Campaign {campaign_id} not found.")
+
+    config = {"configurable": {"thread_id": campaign_id}}
+    snapshot = app.workflow.get_trade_graph().get_state(config)
+    state = dict(snapshot.values) if snapshot and snapshot.values else {}
+
+    audit_transcript = _load_or_reconstruct_transcript(state, campaign_id, db)
+    return _build_campaign_status_payload(campaign_id, db_camp, state, audit_transcript)
+
+
+@router.get("/api/config")
+def get_desk_config():
+    return {
+        "desk_name": settings.desk_name,
+        "desk_email": settings.desk_email,
+        "default_commodity": settings.default_commodity,
+        "default_target_volume_mt": settings.default_target_volume_mt,
+        "default_target_margin_pct": settings.default_target_margin_pct,
+        "default_max_variance_pct": settings.default_max_variance_pct,
+        "default_buffer_usd_per_mt": settings.default_buffer_usd_per_mt,
+        "default_destination_port": settings.default_destination_port,
+        "default_origin_port": settings.default_origin_port,
+        "default_payment_terms": settings.default_payment_terms,
+        "default_broken_percentage": settings.default_broken_percentage,
+        "min_profit_per_mt_hard": settings.default_min_profit_per_mt_hard,
+        "min_profit_per_mt_soft": settings.default_min_profit_per_mt_soft,
+        "max_negotiation_rounds": settings.default_max_negotiation_rounds,
+    }
 
 @router.get("/")
 def serve_index():

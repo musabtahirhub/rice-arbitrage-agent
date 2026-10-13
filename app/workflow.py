@@ -1,11 +1,23 @@
+import app.graph
 from app.graph import (
     build_trade_graph,
     build_arbitrage_graph,
-    checkpointer,
     route_entry_point,
     setup_checkpointer,
-    trade_graph,
+    get_trade_graph,
+    get_checkpointer,
 )
+
+checkpointer = app.graph.checkpointer
+trade_graph = app.graph.trade_graph
+
+
+def __getattr__(name: str):
+    if name == "trade_graph":
+        return app.graph.get_trade_graph()
+    if name == "checkpointer":
+        return app.graph.get_checkpointer()
+    raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
 from app.services.llm_service import (
     generate_dynamic_llm_draft,
     generate_proactive_sco_draft,

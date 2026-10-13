@@ -14,19 +14,19 @@ class Campaign(BaseModel):
     destination_port: str = Field(default_factory=lambda: settings.default_destination_port)
     origin_port_default: str = Field(default_factory=lambda: settings.default_origin_port)
     broken_percentage: float = Field(default_factory=lambda: settings.default_broken_percentage, ge=0.0)
-    min_profit_per_mt_hard: float = Field(default=50.0, ge=0.0)
-    min_profit_per_mt_soft: float = Field(default=120.0, ge=0.0)
-    max_negotiation_rounds: int = Field(default=3, ge=1)
+    min_profit_per_mt_hard: float = Field(default_factory=lambda: settings.default_min_profit_per_mt_hard, ge=0.0)
+    min_profit_per_mt_soft: float = Field(default_factory=lambda: settings.default_min_profit_per_mt_soft, ge=0.0)
+    max_negotiation_rounds: int = Field(default_factory=lambda: settings.default_max_negotiation_rounds, ge=1)
 
 
 class ParsedEmail(BaseModel):
     sender_role: str
-    commodity: str = Field(default="Basmati 1121")
-    quantity_mt: float = Field(default=500.0, gt=0)
+    commodity: str = Field(default_factory=lambda: settings.default_commodity)
+    quantity_mt: float = Field(default_factory=lambda: settings.default_target_volume_mt, gt=0)
     price_usd_per_mt: float = Field(..., ge=0)
     incoterm: str = Field(default="CIF")
     port: Optional[str] = Field(default=None)
-    payment_terms: Optional[str] = Field(default="LC")
+    payment_terms: Optional[str] = Field(default_factory=lambda: settings.default_payment_terms)
     intent: Optional[str] = Field(default="COUNTER_OFFER")
     is_acceptance: bool = Field(default=False)
     summary: Optional[str] = Field(default=None)
@@ -96,9 +96,9 @@ class CreateCampaignRequest(BaseModel):
     target_margin_pct: float = Field(default_factory=lambda: settings.default_target_margin_pct)
     max_variance_from_benchmark_pct: float = Field(default_factory=lambda: settings.default_max_variance_pct)
     destination_port: str = Field(default_factory=lambda: settings.default_destination_port)
-    min_profit_per_mt_hard: float = Field(default=50.0)
-    min_profit_per_mt_soft: float = Field(default=120.0)
-    max_negotiation_rounds: int = Field(default=3)
+    min_profit_per_mt_hard: float = Field(default_factory=lambda: settings.default_min_profit_per_mt_hard)
+    min_profit_per_mt_soft: float = Field(default_factory=lambda: settings.default_min_profit_per_mt_soft)
+    max_negotiation_rounds: int = Field(default_factory=lambda: settings.default_max_negotiation_rounds)
     auto_run: bool = Field(default=False)
 
 
