@@ -397,8 +397,11 @@ def test_proactive_origination_and_tactical_maximization():
     assert_true("CIF Jebel Ali" in cdata["buyer_draft"], "Draft specifies CIF destination port")
     assert_true(cdata.get("pipeline_step") == 1, "Pipeline starts at Step 1 (Buyer Discovered & Pitched)")
     assert_true(cdata.get("deal_status") == "prospecting", "POST /api/campaigns sets deal_status to prospecting")
-    expected_anchor = round(cdata["benchmark_fob_usd"] + 45.0 + 20.0 + 120.0 + 30.0, 2)
+    # Anchor = benchmark + freight + buffer + soft target + SCO premium, but never below the desk's own CIF floor.
+    spread_anchor = cdata["benchmark_fob_usd"] + 45.0 + 20.0 + 120.0 + 30.0
+    expected_anchor = round(max(spread_anchor, cdata["dynamic_cif_floor"]), 2)
     assert_true(cdata.get("anchor_cif_usd") == expected_anchor, f"Initial high-anchor CIF matches formula: ${expected_anchor} (got {cdata.get('anchor_cif_usd')})")
+    assert_true(cdata.get("anchor_cif_usd") >= cdata["dynamic_cif_floor"], "Opening anchor is never below the CIF floor")
 
     campaign = Campaign(
         campaign_id="CAMP-HARD-TEST",

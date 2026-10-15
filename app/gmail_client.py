@@ -3,21 +3,19 @@ import email
 from email.message import EmailMessage
 import email.utils
 import json
-import logging
 import os
 from pathlib import Path
-import sys
 from typing import Any, Optional
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
 from app.config import settings
+from app.logger import get_logger
 from app.email_service import is_simulated_email, normalize_thread_subject, parse_email_draft
 
-logger = logging.getLogger("gmail_client")
+logger = get_logger("arbitrage_desk.gmail_client")
 
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.modify",
@@ -27,34 +25,91 @@ SCOPES = [
 CACHE_FILE = Path(".cache/processed_gmail_ids.json")
 
 
-def _load_processed_ids() -> set[str]:
+PROCESSED_CACHE_LIMIT = 2000
+
+
+def _load_processed_ids() -> dict[str, None]:
+    """Insertion-ordered set (dict keys) of Gmail ids already handled by this process."""
     try:
         if CACHE_FILE.exists():
             with open(CACHE_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 if isinstance(data, list):
-                    return set(data)
+                    return dict.fromkeys(data)
     except Exception as e:
         logger.warning(f"Failed loading processed gmail ids: {e}")
-    return set()
+    return {}
 
 
-def _save_processed_id(msg_id: str):
-    global PROCESSED_GMAIL_MESSAGE_IDS
-    PROCESSED_GMAIL_MESSAGE_IDS.add(msg_id)
+def mark_gmail_message_processed(msg_id: str) -> None:
+    """Cheap per-process pre-filter, called after a message was handled. The processed_inbound_emails
+    table is the source of truth across processes; this only avoids re-fetching known messages."""
+    if not msg_id:
+        return
+    PROCESSED_GMAIL_MESSAGE_IDS.pop(msg_id, None)
+    PROCESSED_GMAIL_MESSAGE_IDS[msg_id] = None
+    while len(PROCESSED_GMAIL_MESSAGE_IDS) > PROCESSED_CACHE_LIMIT:  # evict oldest first
+        PROCESSED_GMAIL_MESSAGE_IDS.pop(next(iter(PROCESSED_GMAIL_MESSAGE_IDS)))
     try:
         CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        to_save = list(PROCESSED_GMAIL_MESSAGE_IDS)[-2000:]
         with open(CACHE_FILE, "w", encoding="utf-8") as f:
-            json.dump(to_save, f)
+            json.dump(list(PROCESSED_GMAIL_MESSAGE_IDS), f)
     except Exception as e:
         logger.warning(f"Failed saving processed gmail id: {e}")
 
 
-PROCESSED_GMAIL_MESSAGE_IDS: set[str] = _load_processed_ids()
+PROCESSED_GMAIL_MESSAGE_IDS: dict[str, None] = _load_processed_ids()
 
 
-def _load_cached_credentials(token_path: str) -> Optional[Credentials]:
+GOOGLE_TOKEN_URI = "https://oauth2.googleapis.com/token"
+AUTH_SETUP_HINT = (
+    "Run `python scripts/gmail_auth.py` once and put GMAIL_REFRESH_TOKEN (plus GMAIL_CLIENT_ID / "
+    "GMAIL_CLIENT_SECRET, or keep credentials.json) in .env."
+)
+
+_cached_credentials: Optional[Credentials] = None
+
+
+def _client_id_and_secret() -> tuple[str, str]:
+    """From settings, falling back to the OAuth client in credentials.json."""
+    client_id, client_secret = settings.gmail_client_id.strip(), settings.gmail_client_secret.strip()
+    if client_id and client_secret:
+        return client_id, client_secret
+    path = settings.google_credentials_json_path
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            client = data.get("installed") or data.get("web") or {}
+            return client_id or client.get("client_id", ""), client_secret or client.get("client_secret", "")
+        except Exception as e:
+            logger.warning(f"[GMAIL CLIENT] Could not read OAuth client from {path}: {e}")
+    return client_id, client_secret
+
+
+def _credentials_from_refresh_token() -> Optional[Credentials]:
+    refresh_token = settings.gmail_refresh_token.strip()
+    if not refresh_token:
+        return None
+    client_id, client_secret = _client_id_and_secret()
+    if not (client_id and client_secret):
+        raise RuntimeError(
+            "GMAIL_REFRESH_TOKEN is set but no OAuth client id/secret was found "
+            "(set GMAIL_CLIENT_ID and GMAIL_CLIENT_SECRET, or provide credentials.json)."
+        )
+    return Credentials(
+        token=None,
+        refresh_token=refresh_token,
+        client_id=client_id,
+        client_secret=client_secret,
+        token_uri=GOOGLE_TOKEN_URI,
+        scopes=SCOPES,
+    )
+
+
+def _credentials_from_token_file() -> Optional[Credentials]:
+    """Legacy fallback: an authorized-user token.json (e.g. from an earlier browser sign-in)."""
+    token_path = settings.google_token_json_path
     if not os.path.exists(token_path):
         return None
     try:
@@ -64,53 +119,36 @@ def _load_cached_credentials(token_path: str) -> Optional[Credentials]:
         return None
 
 
-def _refresh_expired_credentials(creds: Credentials) -> Optional[Credentials]:
-    if creds and creds.expired and creds.refresh_token:
+def _load_credentials() -> Credentials:
+    """Non-interactive Gmail credentials; never opens a browser.
+
+    Order: GMAIL_REFRESH_TOKEN from settings, then token.json. Access tokens are refreshed as needed and
+    kept in memory, so the token endpoint is only hit about once an hour.
+    """
+    global _cached_credentials
+    creds = _cached_credentials or _credentials_from_refresh_token() or _credentials_from_token_file()
+    if creds is None:
+        if not os.path.exists(settings.google_credentials_json_path):
+            raise FileNotFoundError(f"Gmail is not configured. {AUTH_SETUP_HINT}")
+        raise RuntimeError(f"No Gmail refresh token available. {AUTH_SETUP_HINT}")
+
+    if not creds.valid:
+        if not creds.refresh_token:
+            raise RuntimeError(f"Gmail credentials have no refresh token. {AUTH_SETUP_HINT}")
         try:
             creds.refresh(Request())
-            return creds
         except Exception as e:
-            logger.error(f"[GMAIL CLIENT] Error refreshing token: {e}")
-            return None
-    return creds
+            _cached_credentials = None
+            raise RuntimeError(
+                f"Gmail refresh token was rejected ({e}). It may be expired or revoked. {AUTH_SETUP_HINT}"
+            ) from e
 
-
-def _authenticate_from_secrets_file(credentials_path: str, token_path: str) -> Optional[Credentials]:
-    if not os.path.exists(credentials_path):
-        raise FileNotFoundError(
-            f"Gmail credentials not found at {credentials_path}. "
-            f"Please provide credentials.json or a valid token.json."
-        )
-    if not sys.stdin or not sys.stdin.isatty():
-        logger.warning("[GMAIL CLIENT] Non-interactive environment detected; skipping flow.run_local_server.")
-        return None
-    flow = InstalledAppFlow.from_client_secrets_file(credentials_path, SCOPES)
-    creds = flow.run_local_server(port=0)
-    try:
-        with open(token_path, "w", encoding="utf-8") as token_file:
-            token_file.write(creds.to_json())
-    except Exception as e:
-        logger.warning(f"[GMAIL CLIENT] Could not write cached token to {token_path}: {e}")
-    return creds
-
-
-def _load_or_refresh_credentials(token_path: str, credentials_path: str) -> Credentials:
-    creds = _load_cached_credentials(token_path)
-    if not creds or not creds.valid:
-        creds = _refresh_expired_credentials(creds)
-        if not creds:
-            creds = _authenticate_from_secrets_file(credentials_path, token_path)
-    if not creds:
-        raise RuntimeError("Failed to obtain valid Gmail API credentials.")
+    _cached_credentials = creds
     return creds
 
 
 def get_gmail_service():
-    creds = _load_or_refresh_credentials(
-        settings.google_token_json_path,
-        settings.google_credentials_json_path,
-    )
-    return build("gmail", "v1", credentials=creds)
+    return build("gmail", "v1", credentials=_load_credentials(), cache_discovery=False)
 
 
 def setup_gmail_watch(topic_name: str) -> dict:
@@ -122,6 +160,12 @@ def setup_gmail_watch(topic_name: str) -> dict:
     watch_response = service.users().watch(userId="me", body=body).execute()
     logger.info(f"[GMAIL WATCH] Watch registered for topic '{topic_name}': {watch_response}")
     return watch_response
+
+
+def stop_gmail_watch() -> None:
+    """Stop push notifications for this mailbox (users.stop). Safe to call when no watch is active."""
+    get_gmail_service().users().stop(userId="me").execute()
+    logger.info("[GMAIL WATCH] Push notifications stopped for this mailbox.")
 
 
 def _decode_base64_urlsafe(b64_str: str) -> str:
@@ -234,7 +278,6 @@ def _fetch_and_parse_single_message(service, msg_id: str) -> Optional[dict]:
             id=msg_id,
             format="full",
         ).execute()
-        _save_processed_id(msg_id)
         return _parse_gmail_message(full_msg)
     except Exception as e:
         logger.error(f"[GMAIL] Failed to fetch message {msg_id}: {e}")

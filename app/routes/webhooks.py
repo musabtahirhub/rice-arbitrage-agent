@@ -2,6 +2,8 @@ import base64
 import json
 import logging
 from fastapi import APIRouter, BackgroundTasks, Request
+
+from app.config import settings
 from app.services.gmail_worker import process_incoming_gmail_event
 
 logger = logging.getLogger("arbitrage_desk")
@@ -41,6 +43,13 @@ async def gmail_webhook_endpoint(request: Request, background_tasks: BackgroundT
         return WebhookResponse(status="error", message="Invalid JSON").model_dump()
 
     history_id = _extract_pubsub_history_id(body)
+
+    if not settings.use_push_webhooks:
+        # IMAP polling owns inbound mail in this mode. A Gmail watch can outlive a mode switch by up to
+        # 7 days; processing its notifications too would answer each email twice. Ack so Pub/Sub stops retrying.
+        logger.debug(f"[GMAIL WEBHOOK] Ignoring notification historyId='{history_id}' (polling mode).")
+        return WebhookResponse(status="ignored", historyId=history_id).model_dump(exclude_none=True)
+
     logger.info(f"[GMAIL WEBHOOK] Received Pub/Sub webhook notification. historyId: '{history_id}'")
 
     if history_id:

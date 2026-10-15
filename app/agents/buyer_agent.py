@@ -62,7 +62,12 @@ def _calculate_pricing_parameters(
         buffer_usd=buffer_usd,
     )
 
-    anchor_cif = state.get("anchor_cif_usd") or round(benchmark_fob + freight + buffer_usd + campaign.min_profit_per_mt_soft + settings.sco_anchor_premium_usd_per_mt, 2)
+    anchor_cif = state.get("anchor_cif_usd")
+    if not anchor_cif:
+        spread_anchor = benchmark_fob + freight + buffer_usd + campaign.min_profit_per_mt_soft + settings.sco_anchor_premium_usd_per_mt
+        # Never open below our own minimum CIF floor; otherwise a later floor-defense counter would
+        # ask the buyer for more than we first offered.
+        anchor_cif = round(max(spread_anchor, bounds.dynamic_cif_floor), 2)
     return benchmark_fob, freight, bounds, anchor_cif
 
 
@@ -172,12 +177,14 @@ def _assemble_outreach_state(
 
 def proactive_outreach_node(state: DealState, config: Optional[RunnableConfig] = None) -> dict:
     campaign: Campaign = state["campaign"]
+    if isinstance(campaign, dict):
+        campaign = Campaign(**campaign)
     if _is_outreach_already_active(state):
         logger.info(
             f"[WORKFLOW:Proactive Outreach] Campaign '{campaign.campaign_id}' has already initiated outreach "
             f"(status: '{state.get('deal_status')}', step: {state.get('pipeline_step')}). Waiting for counterparty reply."
         )
-        return dict(state)
+        return {}
 
     buyer_name, target_buyer_email, buyers, suppliers = _resolve_target_buyer_contact(campaign.commodity, state)
     benchmark_fob, freight, bounds, anchor_cif = _calculate_pricing_parameters(
@@ -217,8 +224,10 @@ def proactive_outreach_node(state: DealState, config: Optional[RunnableConfig] =
 
 
 def _resolve_target_counter_cif(state: DealState, buyer: Optional[ParsedEmail], action: Optional[str], cif_floor: float) -> float:
-    if state.get("last_counter_cif_usd") is not None:
-        return float(state["last_counter_cif_usd"])
+    # A trader override applies to this counter only; last_counter_cif_usd is a record, not an input,
+    # otherwise every later counter would repeat the first one.
+    if state.get("override_cif_price") is not None:
+        return float(state["override_cif_price"])
     if action == "COUNTER_TO_MAXIMIZE" and buyer:
         return round(buyer.price_usd_per_mt + settings.buyer_counter_step_usd_per_mt, 2)
     return cif_floor

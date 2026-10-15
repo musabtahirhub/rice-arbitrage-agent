@@ -9,10 +9,11 @@ from app.config import settings
 from app.database import get_db
 from app.db_models import CampaignModel, TradeAuditModel
 from app.directory import get_all_counterparties
+from app.email_service import parse_email_draft
 from app.models import Campaign, CreateCampaignRequest, DealState
 import app.workflow
 from app.services.campaign_runner import run_full_autonomous_campaign
-from app.telemetry import get_langfuse_handler
+from app.telemetry import build_trace_config, flush_telemetry, get_langfuse_handler
 
 logger = logging.getLogger("arbitrage_desk")
 
@@ -74,16 +75,13 @@ def _execute_initial_graph_step(campaign: Campaign, langfuse_handler=None) -> di
         "supplier_draft": "",
         "audit_transcript": [],
     }
-    config = {
-        "configurable": {"thread_id": campaign.campaign_id},
-        "callbacks": [langfuse_handler] if langfuse_handler else [],
-        "metadata": {
-            "campaign_id": campaign.campaign_id,
-            "commodity": campaign.commodity,
-            "target_volume_mt": campaign.target_volume_mt,
-        },
-        "tags": ["commodity-arbitrage", campaign.commodity],
-    }
+    config = build_trace_config(
+        campaign.campaign_id,
+        "campaign-launch",
+        langfuse_handler,
+        metadata={"commodity": campaign.commodity, "target_volume_mt": campaign.target_volume_mt},
+        tags=[campaign.commodity],
+    )
     return app.workflow.get_trade_graph().invoke(initial_state, config=config)
 
 
@@ -167,40 +165,48 @@ def create_campaign(req: CreateCampaignRequest, db: Session = Depends(get_db)):
     if req.auto_run:
         logger.info(f"[AUTONOMOUS CAMPAIGN] Auto-running campaign '{campaign_id}' through full negotiation lifecycle...")
         res = run_full_autonomous_campaign(campaign_id, db=db)
-        if langfuse_handler:
-            langfuse_handler.flush()
+        flush_telemetry()
         logger.info(f"[AUTONOMOUS CAMPAIGN] Campaign '{campaign_id}' completed with status: {res.get('deal_status')}")
         return res
 
     resp = _build_create_campaign_response(campaign_id, campaign, launched_state)
-    if langfuse_handler:
-        langfuse_handler.flush()
+    flush_telemetry()
     return resp
 
 
 def _load_or_reconstruct_transcript(state: dict, campaign_id: str, db: Session) -> list:
-    audit_transcript = state.get("audit_transcript") or []
-    if audit_transcript:
-        return audit_transcript
+    """Return the most complete history available.
 
+    Graph state only holds entries written by graph nodes (e.g. the opening SCO), while every API and
+    email turn is recorded in trade_audits. Use whichever source has more entries.
+    """
+    state_transcript = state.get("audit_transcript") or []
     audits = (
         db.query(TradeAuditModel)
         .filter(TradeAuditModel.campaign_id == campaign_id)
         .order_by(TradeAuditModel.id.asc())
         .all()
     )
-    fallback_transcript = []
-    for a in audits:
+    if len(state_transcript) >= len(audits):
+        return state_transcript
+
+    desk = f"Trading Desk ({settings.desk_name})"
+    transcript = []
+    for turn, a in enumerate(audits):
+        message = a.raw_message or ""
+        subject = parse_email_draft(message, default_subject="")[0] if message.lower().startswith("subject:") else ""
+        inbound = a.direction == "INBOUND"
         entry = AuditTranscriptEntry(
-            turn=0,
-            sender=a.role,
-            recipient="trading_desk",
+            turn=turn,
+            sender=a.role if inbound else desk,
+            recipient=desk if inbound else "counterparty",
             role=a.role,
             action=a.direction,
-            message=a.raw_message or "",
+            subject=subject,
+            message=message,
         )
-        fallback_transcript.append(entry.model_dump(exclude_none=True))
-    return fallback_transcript
+        transcript.append(entry.model_dump(exclude_none=True))
+    return transcript
 
 
 def _build_campaign_status_payload(

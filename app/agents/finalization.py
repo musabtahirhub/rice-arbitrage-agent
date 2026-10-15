@@ -65,7 +65,7 @@ def _resolve_approval_command(decision: ApprovalResumeDecision) -> Command:
             goto="counter_buyer",
             update={
                 "deal_approved_by_human": False,
-                "last_counter_cif_usd": float(decision.override_cif_price),
+                "override_cif_price": float(decision.override_cif_price),
                 "evaluation_reason": decision.reviewer_notes or "Trader floor override",
             },
         )

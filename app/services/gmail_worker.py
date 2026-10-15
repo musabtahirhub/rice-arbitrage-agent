@@ -1,5 +1,6 @@
 import asyncio
 import email.utils
+import hashlib
 import logging
 import re
 from typing import Optional
@@ -9,7 +10,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 import app.database
 from app.db_models import CampaignModel, TradeAuditModel
-from app.directory import get_buyers_for_commodity, get_suppliers_for_commodity
+from app.directory import get_buyers_for_commodity, get_suppliers_for_commodity, resolve_supplier_contact
 from app.email_service import (
     check_latest_reply,
     initialize_unseen_snapshot,
@@ -19,6 +20,7 @@ from app.email_service import (
 )
 from app.gmail_client import (
     fetch_latest_messages_by_history,
+    mark_gmail_message_processed,
     send_gmail_reply,
 )
 from app.market import get_benchmark_rate
@@ -26,7 +28,8 @@ from app.models import Campaign, ParsedEmail
 import app.workflow
 from app.workflow import split_subject_and_body
 from app.services.email_matcher import match_email_to_campaign
-from app.telemetry import get_langfuse_handler
+from app.services.inbound_dedupe import claim_message, complete_message, message_key, release_message
+from app.telemetry import build_trace_config, flush_telemetry, get_langfuse_handler
 
 logger = logging.getLogger("arbitrage_desk")
 
@@ -49,8 +52,9 @@ def _is_message_from_desk(sender: str, desk_emails: set[str]) -> bool:
 
 def _collect_allowed_senders(db: Session) -> set[str]:
     allowed_senders: set[str] = set()
-    if settings.my_test_email:
-        allowed_senders.add(settings.my_test_email.strip().lower())
+    for test_inbox in (settings.my_test_email, settings.my_test_supplier_email):
+        if test_inbox:
+            allowed_senders.add(test_inbox.strip().lower())
 
     active_campaigns = (
         db.query(CampaignModel)
@@ -64,26 +68,23 @@ def _collect_allowed_senders(db: Session) -> set[str]:
     return allowed_senders
 
 
-def _prepare_campaign_graph_state(
-    db_camp: CampaignModel,
-    raw_body: str,
-    msg_id: str,
-    references: str,
-    sub: str,
-    thread_id: str,
-) -> tuple[dict, dict]:
+def _build_inbound_config(db_camp: CampaignModel) -> tuple[dict, Optional[object]]:
     langfuse_handler = get_langfuse_handler()
-    config = {
-        "configurable": {"thread_id": db_camp.id},
-        "callbacks": [langfuse_handler] if langfuse_handler else [],
-        "metadata": {
-            "campaign_id": db_camp.id,
+    config = build_trace_config(
+        db_camp.id,
+        "gmail-inbound-turn",
+        langfuse_handler,
+        metadata={
             "commodity": db_camp.commodity,
             "target_volume_mt": db_camp.target_volume_mt,
             "source": "gmail_inbound",
         },
-        "tags": ["commodity-arbitrage", db_camp.commodity, "gmail-inbound"],
-    }
+        tags=[db_camp.commodity, "gmail-inbound"],
+    )
+    return config, langfuse_handler
+
+
+def _load_campaign_state(db_camp: CampaignModel, config: dict) -> dict:
     snapshot = app.workflow.get_trade_graph().get_state(config)
     state = dict(snapshot.values) if snapshot and snapshot.values else {}
     if "campaign" not in state:
@@ -94,48 +95,78 @@ def _prepare_campaign_graph_state(
             destination_port=db_camp.destination_port,
             origin_port_default=db_camp.origin_port_default,
         )
+    elif isinstance(state["campaign"], dict):
+        state["campaign"] = Campaign(**state["campaign"])
+    return state
 
+
+def _classify_sender_role(sender: str, state: dict, commodity: str) -> str:
+    """Supplier if the sender is a known supplier contact for this campaign; otherwise buyer."""
+    addr = email.utils.parseaddr(sender)[1].strip().lower()
+    if not addr:
+        return "buyer"
+    supplier_addrs = {s.contact_email.strip().lower() for s in get_suppliers_for_commodity(commodity) if s.contact_email}
+    for known in (state.get("target_supplier_email"), settings.my_test_supplier_email):
+        if known:
+            supplier_addrs.add(str(known).strip().lower())
+    return "supplier" if addr in supplier_addrs else "buyer"
+
+
+def _prepare_campaign_graph_state(
+    state: dict,
+    raw_body: str,
+    role: str,
+    msg_id: str,
+    references: str,
+    sub: str,
+    thread_id: str,
+) -> dict:
     state["latest_email"] = raw_body
-    state["active_role"] = "buyer"
+    state["active_role"] = role
     state["buyer_draft"] = ""
     state["supplier_draft"] = ""
 
+    id_key, refs_key = (
+        ("last_supplier_message_id", "supplier_references") if role == "supplier"
+        else ("last_buyer_message_id", "buyer_references")
+    )
     if msg_id:
-        state["last_buyer_message_id"] = msg_id
-        existing_refs = state.get("buyer_references") or references or ""
+        state[id_key] = msg_id
+        existing_refs = state.get(refs_key) or references or ""
         if msg_id not in existing_refs:
-            state["buyer_references"] = f"{existing_refs} {msg_id}".strip()
-    elif references and not state.get("buyer_references"):
-        state["buyer_references"] = references
+            state[refs_key] = f"{existing_refs} {msg_id}".strip()
+    elif references and not state.get(refs_key):
+        state[refs_key] = references
 
-    if not state.get("thread_subject") and sub:
-        clean_sub = re.sub(r"^(?:re|fwd|fw):\s*", "", sub, flags=re.IGNORECASE).strip()
-        state["thread_subject"] = clean_sub
+    if role == "buyer":
+        if not state.get("thread_subject") and sub:
+            clean_sub = re.sub(r"^(?:re|fwd|fw):\s*", "", sub, flags=re.IGNORECASE).strip()
+            state["thread_subject"] = clean_sub
+        if thread_id:
+            state["gmail_thread_id"] = thread_id
 
-    if thread_id:
-        state["thread_id"] = thread_id
-
-    return state, config
+    return state
 
 
-def _resolve_deal_counterparties(camp: Campaign, sender: str, desk_emails: set[str]) -> tuple:
+def _resolve_deal_counterparties(camp: Campaign, sender: str, desk_emails: set[str], state: dict, role: str) -> tuple:
     buyers = get_buyers_for_commodity(camp.commodity)
-    suppliers = get_suppliers_for_commodity(camp.commodity)
     me_buyers = [b for b in buyers if b.country in ["UAE", "Saudi Arabia", "Qatar", "Kuwait", "Oman", "Bahrain"]]
     primary_buyer = me_buyers[0] if me_buyers else (buyers[0] if buyers else None)
-    target_supplier = suppliers[0] if suppliers else None
 
     buyer_name = primary_buyer.name if primary_buyer else "Procurement Partner"
     buyer_email = settings.my_test_email or (primary_buyer.contact_email if primary_buyer else "procurement@domain.com")
-    supp_name = target_supplier.name if target_supplier else "Supplier Partner"
-    supp_email = target_supplier.contact_email if target_supplier else "export@supplier.com"
+    supp_name, supp_email = resolve_supplier_contact(
+        camp.commodity, state.get("target_supplier_email"), state.get("target_supplier_name")
+    )
 
     parsed_sender_email = email.utils.parseaddr(sender)[1]
-    target_buyer_email = (
-        parsed_sender_email
-        if parsed_sender_email and not any(desk_e in parsed_sender_email.lower() for desk_e in desk_emails)
-        else buyer_email
-    )
+    sender_is_external = bool(parsed_sender_email) and not any(desk_e in parsed_sender_email.lower() for desk_e in desk_emails)
+    if role == "supplier":
+        target_buyer_email = state.get("target_buyer_email") or buyer_email
+        if sender_is_external:
+            supp_email = parsed_sender_email
+    else:
+        target_buyer_email = parsed_sender_email if sender_is_external else buyer_email
     return buyer_name, target_buyer_email, supp_name, supp_email
 
 
@@ -254,23 +285,28 @@ def _ensure_supplier_allocation(
 def _record_inbound_audit(
     updated_state: dict,
     db_camp: CampaignModel,
-    buyer_name: str,
+    role: str,
+    counterparty_name: str,
     sender: str,
-    buyer_email: str,
     sub: str,
     raw_body: str,
     db: Session,
 ) -> None:
     curr_round = updated_state.get("negotiation_round", 1)
     camp = updated_state["campaign"]
-    buyer_t = updated_state.get("buyer_terms")
-    inbound_price = buyer_t.price_usd_per_mt if buyer_t else None
+    terms = updated_state.get("supplier_terms" if role == "supplier" else "buyer_terms")
+    inbound_price = terms.price_usd_per_mt if terms else None
+    default_sub = (
+        f"Re: {camp.commodity} FOB {camp.origin_port_default}" if role == "supplier"
+        else f"Re: {camp.commodity} CIF {camp.destination_port}"
+    )
     _append_worker_audit_and_transcript(
         updated_state, db, db_camp.id, curr_round,
-        f"{buyer_name} <{sender or buyer_email}>", f"Trading Desk ({settings.desk_name})",
-        "buyer", "INCOMING_COUNTER", sub or f"Re: {camp.commodity} CIF {camp.destination_port}",
-        raw_body, "INBOUND", inbound_price, updated_state.get("net_spread_usd")
+        f"{counterparty_name} <{sender}>", f"Trading Desk ({settings.desk_name})",
+        role, "INCOMING_SUPPLIER_QUOTE" if role == "supplier" else "INCOMING_COUNTER",
+        sub or default_sub, raw_body, "INBOUND", inbound_price, updated_state.get("net_spread_usd")
     )
+
 
 def _dispatch_supplier_reply_if_required(
     updated_state: dict,
@@ -285,8 +321,9 @@ def _dispatch_supplier_reply_if_required(
     use_gmail_api: bool = True,
 ) -> None:
     action = updated_state.get("action")
+    # Drafts are cleared before each turn, so a non-empty supplier_draft (RFQ, counter or decline) is new.
     supp_msg = updated_state.get("supplier_draft")
-    if not (supp_msg and (action in ["ACCEPT_AND_CLOSE", "LOCK_SUPPLIER_ALLOCATION"] or "Volume Lock" in supp_msg or not state.get("supplier_terms"))):
+    if not supp_msg:
         return
 
     camp = updated_state["campaign"]
@@ -300,8 +337,11 @@ def _dispatch_supplier_reply_if_required(
         supp_msg,
         default_subject=f"Urgent RFQ / Volume Lock — {camp.commodity} FOB {camp.origin_port_default}",
     )
-    supp_action = "LOCK_SUPPLIER_ALLOCATION" if action == "ACCEPT_AND_CLOSE" else "SUPPLIER_RFQ"
-    supp_price = state.get("supplier_terms").price_usd_per_mt if state.get("supplier_terms") else None
+    supp_action = "SUPPLIER_RFQ" if not state.get("supplier_terms") else (
+        "REJECT_SUPPLIER" if action == "REJECT_HARD" else "COUNTER_SUPPLIER"
+    )
+    supp_terms = updated_state.get("supplier_terms")
+    supp_price = supp_terms.price_usd_per_mt if supp_terms else None
     _append_worker_audit_and_transcript(
         updated_state, db, db_camp.id, curr_round,
         f"Trading Desk ({settings.desk_name})", f"{supp_name} <{supp_email}>",
@@ -361,6 +401,32 @@ def _dispatch_buyer_reply_if_required(
     )
 
 
+def _record_inbound_while_awaiting_approval(
+    db_camp: CampaignModel, role: str, sender: str, raw_body: str, db: Session
+) -> None:
+    logger.warning(
+        f"[GMAIL EVENT] Campaign {db_camp.id} is awaiting human approval; inbound {role} email from '{sender}' "
+        f"recorded but not run through the graph (it would bypass the pending approval)."
+    )
+    db.add(TradeAuditModel(
+        campaign_id=db_camp.id,
+        thread_id=db_camp.id,
+        role=role,
+        raw_message=raw_body or "",
+        direction="INBOUND",
+    ))
+    db.commit()
+
+
+def _inbound_message_key(msg_id: str, sender: str, sub: str, raw_body: str) -> str:
+    """RFC Message-ID (identical for push and IMAP); without one, a hash of the email's content."""
+    key = message_key(msg_id)
+    if key:
+        return key
+    digest = hashlib.sha256("\x1f".join((sender, sub, raw_body)).encode("utf-8")).hexdigest()
+    return f"sha256:{digest}"
+
+
 def _process_inbound_message_transaction(
     db_camp: CampaignModel,
     raw_body: str,
@@ -374,44 +440,87 @@ def _process_inbound_message_transaction(
     db: Session,
     use_gmail_api: bool = True,
 ) -> None:
-    state, config = _prepare_campaign_graph_state(db_camp, raw_body, msg_id, references, sub, thread_id)
-    buyer_name, buyer_email, supp_name, supp_email = _resolve_deal_counterparties(state["campaign"], sender, desk_emails)
-    state["target_buyer_email"] = buyer_email
+    """Handle one inbound email exactly once, whichever path (push/poll) or process delivered it."""
+    key = _inbound_message_key(msg_id, sender, sub, raw_body)
+    source = "push" if use_gmail_api else "poll"
+    if not claim_message(db, key, source, campaign_id=db_camp.id):
+        logger.info(f"[GMAIL EVENT] Email '{key}' already processed or in progress ({source}); skipping duplicate delivery.")
+        return
+    try:
+        _run_inbound_message_transaction(
+            db_camp, raw_body, sender, sub, msg_id, references, thread_id, desk_emails, db, use_gmail_api
+        )
+    except Exception:
+        release_message(db, key)
+        raise
+    complete_message(db, key)
 
-    _ensure_supplier_allocation(state, db_camp, supp_name, supp_email, db)
+
+def _run_inbound_message_transaction(
+    db_camp: CampaignModel,
+    raw_body: str,
+    sender: str,
+    sub: str,
+    msg_id: str,
+    references: str,
+    thread_id: str,
+    desk_emails: set[str],
+    db: Session,
+    use_gmail_api: bool,
+) -> None:
+    config, langfuse_handler = _build_inbound_config(db_camp)
+    state = _load_campaign_state(db_camp, config)
+    camp: Campaign = state["campaign"]
+    role = _classify_sender_role(sender, state, camp.commodity)
+
+    if app.workflow.is_awaiting_approval(config):
+        _record_inbound_while_awaiting_approval(db_camp, role, sender, raw_body, db)
+        return
+
+    state = _prepare_campaign_graph_state(state, raw_body, role, msg_id, references, sub, thread_id)
+    buyer_name, buyer_email, supp_name, supp_email = _resolve_deal_counterparties(camp, sender, desk_emails, state, role)
+    state["target_buyer_email"] = buyer_email
+    state["target_supplier_email"] = supp_email
+    state["target_supplier_name"] = supp_name
+
+    if role == "buyer" and settings.simulate_supplier:
+        _ensure_supplier_allocation(state, db_camp, supp_name, supp_email, db)
 
     updated_state = app.workflow.get_trade_graph().invoke(state, config=config)
-    langfuse_handler = get_langfuse_handler()
-    if langfuse_handler:
-        langfuse_handler.flush()
+    flush_telemetry()
 
-    snapshot = app.workflow.get_trade_graph().get_state(config)
-    if snapshot and snapshot.next and "approval_gate" in snapshot.next:
+    awaiting_approval = app.workflow.is_awaiting_approval(config)
+    if awaiting_approval:
         app.workflow.get_trade_graph().update_state(config, {"deal_status": "pending_approval"})
         updated_state["deal_status"] = "pending_approval"
 
-    _record_inbound_audit(updated_state, db_camp, buyer_name, sender, buyer_email, sub, raw_body, db)
+    counterparty_name = supp_name if role == "supplier" else buyer_name
+    _record_inbound_audit(updated_state, db_camp, role, counterparty_name, sender or buyer_email, sub, raw_body, db)
 
     curr_round = updated_state.get("negotiation_round", 1)
     deal_status = updated_state.get("deal_status")
     action = updated_state.get("action")
 
-    if deal_status == "pending_approval" or (snapshot and snapshot.next and "approval_gate" in snapshot.next):
+    if awaiting_approval:
         logger.info(
             f"[GMAIL EVENT] Campaign {db_camp.id} is awaiting human approval. "
-            f"Halting outbound buyer dispatch until approval is confirmed."
+            f"Halting outbound dispatch until approval is confirmed."
         )
     else:
+        # Gmail thread ids only belong to the thread of the counterparty who wrote in.
         _dispatch_supplier_reply_if_required(
-            updated_state, state, db_camp, supp_name, supp_email, msg_id, thread_id, curr_round, db, use_gmail_api
+            updated_state, state, db_camp, supp_name, supp_email, msg_id,
+            thread_id if role == "supplier" else "", curr_round, db, use_gmail_api
         )
         _dispatch_buyer_reply_if_required(
-            updated_state, db_camp, buyer_name, buyer_email, thread_id, curr_round, db, use_gmail_api
+            updated_state, db_camp, buyer_name, buyer_email,
+            thread_id if role == "buyer" else (updated_state.get("gmail_thread_id") or ""),
+            curr_round, db, use_gmail_api
         )
 
     db_camp.deal_status = deal_status or db_camp.deal_status
     db.commit()
-    logger.info(f"[GMAIL EVENT] Campaign {db_camp.id} updated to status: {deal_status} (action: {action})")
+    logger.info(f"[GMAIL EVENT] Campaign {db_camp.id} updated to status: {deal_status} (action: {action}, role: {role})")
 
 
 async def email_polling_worker():
@@ -495,6 +604,16 @@ def _handle_single_push_message(msg_data: dict, desk_emails: set[str]) -> None:
         )
 
 
+def _is_stale_history_id(new_history_id: str, cursor: Optional[str]) -> bool:
+    """True when a notification's historyId is not newer than the cursor we've already listed from."""
+    if not (new_history_id and cursor):
+        return False
+    try:
+        return int(new_history_id) <= int(cursor)
+    except ValueError:
+        return False
+
+
 async def process_incoming_gmail_event(history_id: str):
     async with GMAIL_EVENT_LOCK:
         global LAST_SEEN_HISTORY_ID
@@ -505,7 +624,16 @@ async def process_incoming_gmail_event(history_id: str):
             f"LAST_SEEN_HISTORY_ID='{start_history_id}'"
         )
 
-        query_id = start_history_id if (start_history_id and start_history_id != new_history_id) else (new_history_id if not start_history_id else None)
+        if _is_stale_history_id(new_history_id, start_history_id):
+            # Pub/Sub redelivers backlogs out of order. Listing from the newer cursor already covered
+            # everything up to this id, so re-listing from an older cursor would only re-fetch old mail.
+            logger.info(
+                f"[GMAIL EVENT] Skipping stale notification historyId='{new_history_id}' "
+                f"(cursor already at '{start_history_id}')."
+            )
+            return
+
+        query_id = start_history_id or new_history_id
         try:
             messages = await asyncio.to_thread(fetch_latest_messages_by_history, query_id or "")
         except Exception as e:
@@ -513,7 +641,7 @@ async def process_incoming_gmail_event(history_id: str):
             return
 
         if new_history_id:
-            LAST_SEEN_HISTORY_ID = new_history_id
+            LAST_SEEN_HISTORY_ID = new_history_id  # only reached when new > cursor: never moves backwards
 
         if not messages:
             logger.info(f"[GMAIL EVENT] No new messages returned for history_id='{history_id}'")
@@ -521,4 +649,10 @@ async def process_incoming_gmail_event(history_id: str):
 
     desk_emails = _get_desk_email_set()
     for msg_data in messages:
-        await asyncio.to_thread(_handle_single_push_message, msg_data, desk_emails)
+        try:
+            await asyncio.to_thread(_handle_single_push_message, msg_data, desk_emails)
+        except Exception as e:
+            # Not marked processed: the DB claim was released, so a later notification can retry it.
+            logger.error(f"[GMAIL EVENT ERROR] Failed handling message {msg_data.get('id')}: {e}", exc_info=True)
+            continue
+        mark_gmail_message_processed(msg_data.get("id", ""))

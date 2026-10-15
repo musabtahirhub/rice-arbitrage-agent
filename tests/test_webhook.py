@@ -78,8 +78,13 @@ def test_configuration_settings():
     assert_true(hasattr(settings, "use_push_webhooks"), "settings has use_push_webhooks")
 
     assert_true(isinstance(settings.google_pubsub_topic, str), "google_pubsub_topic is str")
-    assert_true(settings.google_credentials_json_path == "credentials.json", "default credentials path is credentials.json")
-    assert_true(settings.google_token_json_path == "token.json", "default token path is token.json")
+    # Check the code defaults, independent of .env or shell overrides.
+    import os
+    from app.config import Settings
+    with patch.dict(os.environ, {}, clear=True):
+        defaults = Settings(_env_file=None)
+    assert_true(defaults.google_credentials_json_path == "credentials.json", "default credentials path is credentials.json")
+    assert_true(defaults.google_token_json_path == "token.json", "default token path is token.json")
     assert_true(isinstance(settings.use_push_webhooks, bool), "use_push_webhooks is bool")
 
 
@@ -405,6 +410,7 @@ def test_lifespan_webhook_activation():
 
     # Test legacy mode keeps polling worker active if credentials configured
     with patch("app.main.setup_gmail_watch") as mock_watch, \
+         patch("app.main.stop_gmail_watch") as mock_stop, \
          patch("app.main.email_polling_worker") as mock_poller:
 
         original_push = settings.use_push_webhooks
@@ -422,6 +428,8 @@ def test_lifespan_webhook_activation():
             asyncio.run(run_lifespan_legacy_test())
             assert_true(not mock_watch.called, "setup_gmail_watch not called when use_push_webhooks=False")
             assert_true(mock_poller.called, "Legacy email_polling_worker called when use_push_webhooks=False and credentials configured")
+            if settings.google_pubsub_topic:
+                assert_true(mock_stop.called, "Polling mode stops any leftover Gmail push watch")
 
         finally:
             settings.use_push_webhooks = original_push

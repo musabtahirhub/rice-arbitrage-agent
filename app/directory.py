@@ -1,4 +1,6 @@
 from typing import Optional
+
+from app.config import settings
 from app.models import Counterparty
 
 BUYERS = [
@@ -88,6 +90,24 @@ def get_suppliers_for_commodity(commodity: str) -> list[Counterparty]:
         if any(query in c.lower() or c.lower() in query for c in s.preferred_commodities)
     ]
     return matches or SUPPLIERS
+
+
+def resolve_supplier_contact(
+    commodity: str,
+    state_email: Optional[str] = None,
+    state_name: Optional[str] = None,
+) -> tuple[str, str]:
+    """(name, email) for supplier mail: the test inbox first (MY_TEST_SUPPLIER_EMAIL), then the address
+    already on the deal, then the directory. Test mode wins so no directory address is ever mailed while testing."""
+    suppliers = get_suppliers_for_commodity(commodity)
+    primary = suppliers[0] if suppliers else None
+    name = state_name or (primary.name if primary else "Supplier Partner")
+    test_email = settings.my_test_supplier_email.strip()
+    if test_email:
+        return name, test_email
+    if state_email:
+        return name, state_email
+    return name, primary.contact_email if primary else "export@supplier.com"
 
 
 def get_counterparty_by_id(cp_id: str) -> Optional[Counterparty]:

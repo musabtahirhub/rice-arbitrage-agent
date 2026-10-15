@@ -26,6 +26,8 @@ class Settings(BaseSettings):
     email_user: str = ""
     email_pass: str = ""
     my_test_email: str = ""
+    # Test inbox that plays the supplier. When set, all supplier mail goes here instead of directory addresses.
+    my_test_supplier_email: str = ""
     email_poll_interval_seconds: int = 15
     email_timeout_seconds: float = 30.0
     imap_mailbox_folder: str = "INBOX"
@@ -33,6 +35,12 @@ class Settings(BaseSettings):
     google_pubsub_topic: str = ""
     google_credentials_json_path: str = "credentials.json"
     google_token_json_path: str = "token.json"
+    # Headless Gmail OAuth (preferred): the server refreshes access tokens from these and never opens a
+    # browser. Generate them once with `python scripts/gmail_auth.py`. If client id/secret are empty they
+    # are read from credentials.json.
+    gmail_client_id: str = ""
+    gmail_client_secret: str = ""
+    gmail_refresh_token: str = ""
     use_push_webhooks: bool = True
 
     port: int = 8000
@@ -42,6 +50,7 @@ class Settings(BaseSettings):
     checkpointer_backend: str = "memory"
     checkpointer_allow_volatile_fallback: bool = False
     log_level: str = "INFO"
+    log_file: str = ""  # empty = logs/arbitrage_desk.log
 
     market_source_url: str = "https://query1.finance.yahoo.com/v8/finance/chart/ZR=F?interval=1d&range=5d"
     market_cache_file: str = "market_cache.json"
@@ -70,6 +79,10 @@ class Settings(BaseSettings):
     sco_anchor_premium_usd_per_mt: float = 30.0
     buyer_counter_step_usd_per_mt: float = 25.0
     supplier_counter_step_usd_per_mt: float = 20.0
+    quantity_tolerance_pct: float = 2.0
+    # Demo only: fabricate a supplier quote at benchmark FOB when a live buyer email arrives before any real
+    # supplier quote. Off by default — a real supplier quote is required before a deal can be approved.
+    simulate_supplier: bool = False
 
     desk_name: str = "Global Agro Arbitrage Desk"
     desk_email: str = "desk@arbitrage.com"
@@ -77,7 +90,6 @@ class Settings(BaseSettings):
     @field_validator("cors_origins", mode="before")
     @classmethod
     def assemble_cors_origins(cls, v: Any) -> list[str]:
-        """Parse comma-separated strings, JSON arrays, or lists into valid cors_origins."""
         # 1. If unset (None), fallback to default wildcard
         if v is None:
             return ["*"]

@@ -75,13 +75,17 @@ class DealState(TypedDict, total=False):
     buyer_accepted: Optional[bool]
     target_buyer_name: Optional[str]
     target_buyer_email: Optional[str]
+    target_supplier_name: Optional[str]
+    target_supplier_email: Optional[str]
+    gmail_thread_id: Optional[str]
     discovered_buyers: Optional[list[dict]]
     discovered_suppliers: Optional[list[dict]]
     trigger: Optional[str]
     skip_email_dispatch: Optional[bool]
-    deal_approved_by_human: Optional[bool] = None
-    reviewer_notes: Optional[str] = None
-    override_cif_price: Optional[float] = None
+    deal_approved_by_human: Optional[bool]
+    reviewer_notes: Optional[str]
+    # One-shot human override for the next buyer counter; consumed (reset to None) by counter_buyer_node.
+    override_cif_price: Optional[float]
 
 
 class ApprovalPayload(BaseModel):

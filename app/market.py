@@ -1,5 +1,4 @@
 import json
-import logging
 import os
 import re
 import time
@@ -9,8 +8,9 @@ import httpx
 from bs4 import BeautifulSoup
 
 from app.config import settings
+from app.logger import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger("arbitrage_desk.market")
 
 CACHE_FILE = Path(__file__).resolve().parent.parent / settings.market_cache_file
 CACHE_TTL_SECONDS = settings.market_cache_ttl_seconds

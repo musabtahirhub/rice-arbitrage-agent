@@ -2,6 +2,7 @@ from typing import Literal
 
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.postgres import PostgresSaver
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.graph import StateGraph, END
 
 from app.config import settings
@@ -47,8 +48,20 @@ def _sync_workflow_exports(cp, graph):
         wf.trade_graph = graph
 
 
+# Our Pydantic models stored in DealState. LangGraph only deserializes allow-listed types from
+# checkpoints (unregistered types will be blocked in a future version), so register them here.
+CHECKPOINT_ALLOWED_TYPES = [
+    ("app.models", "Campaign"),
+    ("app.models", "ParsedEmail"),
+]
+
+
+def build_checkpoint_serde() -> JsonPlusSerializer:
+    return JsonPlusSerializer(allowed_msgpack_modules=CHECKPOINT_ALLOWED_TYPES)
+
+
 def _initialize_checkpointer():
-    return InMemorySaver()
+    return InMemorySaver(serde=build_checkpoint_serde())
 
 
 checkpointer = _initialize_checkpointer()
@@ -77,7 +90,7 @@ def setup_checkpointer():
         try:
             if hasattr(pool, "closed") and pool.closed:
                 pool.open()
-            saver = PostgresSaver(pool)
+            saver = PostgresSaver(pool, serde=build_checkpoint_serde())
             saver.setup()
             checkpointer = saver
             trade_graph = build_trade_graph(checkpointer=checkpointer)
@@ -90,12 +103,12 @@ def setup_checkpointer():
                 logger.error(f"[CHECKPOINTER] PostgreSQL checkpointer setup failed and volatile fallback is disabled: {exc}")
                 raise RuntimeError(f"PostgreSQL checkpointer setup failed: {exc}") from exc
             logger.warning(f"[CHECKPOINTER] Postgres checkpointer setup failed, falling back to InMemorySaver: {exc}")
-            checkpointer = InMemorySaver()
+            checkpointer = InMemorySaver(serde=build_checkpoint_serde())
             trade_graph = build_trade_graph(checkpointer=checkpointer)
             _sync_workflow_exports(checkpointer, trade_graph)
             return checkpointer
 
-    checkpointer = InMemorySaver()
+    checkpointer = InMemorySaver(serde=build_checkpoint_serde())
     trade_graph = build_trade_graph(checkpointer=checkpointer)
     _sync_workflow_exports(checkpointer, trade_graph)
     return checkpointer

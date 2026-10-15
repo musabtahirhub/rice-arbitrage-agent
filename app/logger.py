@@ -7,8 +7,9 @@ import sys
 
 from app.config import settings
 
-LOGS_DIR = Path(__file__).resolve().parent.parent / "logs"
-LOG_FILE = LOGS_DIR / "arbitrage_desk.log"
+# LOG_FILE in .env/env overrides the default, e.g. so test runs don't write into the server's log.
+LOG_FILE = Path(settings.log_file) if settings.log_file else Path(__file__).resolve().parent.parent / "logs" / "arbitrage_desk.log"
+LOGS_DIR = LOG_FILE.parent
 
 _CONFIGURED = False
 

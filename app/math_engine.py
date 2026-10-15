@@ -227,6 +227,32 @@ def _check_missing_terms(
     return None
 
 
+def _negotiable_violation(
+    reason: str,
+    round_num: int,
+    max_rounds: int,
+    bounds: DynamicBounds,
+) -> DealEvaluation:
+    """A fixable problem (price above ceiling, volume mismatch): counter while rounds remain, then reject."""
+    exhausted = round_num >= max_rounds
+    return DealEvaluation(
+        viable=False,
+        action="REJECT_HARD" if exhausted else None,
+        net_spread=0.0,
+        net_margin_pct=0.0,
+        landed_cost=0.0,
+        reason=f"{reason} Negotiation rounds exhausted ({round_num}/{max_rounds})." if exhausted else reason,
+        dynamic_fob_ceiling=bounds.dynamic_fob_ceiling,
+        landed_cost_at_ceiling=bounds.landed_cost_at_ceiling,
+        dynamic_cif_floor=bounds.dynamic_cif_floor,
+    )
+
+
+def _quantities_match(buyer_qty: float, supplier_qty: float) -> bool:
+    tolerance = max(buyer_qty, supplier_qty) * settings.quantity_tolerance_pct / 100.0
+    return abs(buyer_qty - supplier_qty) <= tolerance
+
+
 def _validate_terms_constraints(
     buyer_terms: ParsedEmail,
     supplier_terms: ParsedEmail,
@@ -237,34 +263,24 @@ def _validate_terms_constraints(
     benchmark_fob: float,
     max_variance_pct: float,
     round_num: int,
+    max_rounds: int,
     bounds: DynamicBounds,
 ) -> Optional[DealEvaluation]:
-    if buyer_terms.quantity_mt != supplier_terms.quantity_mt:
-        return DealEvaluation(
-            viable=False,
-            action="REJECT_HARD",
-            net_spread=0.0,
-            net_margin_pct=0.0,
-            landed_cost=0.0,
-            reason=f"Quantity mismatch: Buyer requested {buyer_terms.quantity_mt} MT, but supplier offered {supplier_terms.quantity_mt} MT.",
-            dynamic_fob_ceiling=bounds.dynamic_fob_ceiling,
-            landed_cost_at_ceiling=bounds.landed_cost_at_ceiling,
-            dynamic_cif_floor=bounds.dynamic_cif_floor,
+    if not _quantities_match(buyer_terms.quantity_mt, supplier_terms.quantity_mt):
+        return _negotiable_violation(
+            f"Quantity mismatch: Buyer requested {buyer_terms.quantity_mt} MT, but supplier offered {supplier_terms.quantity_mt} MT.",
+            round_num, max_rounds, bounds,
         )
 
     if supplier_fob > fob_ceiling:
-        return DealEvaluation(
-            viable=False,
-            action="REJECT_HARD",
-            net_spread=0.0,
-            net_margin_pct=0.0,
-            landed_cost=0.0,
-            reason=f"Supplier FOB ${supplier_fob:.2f}/MT exceeds dynamic ceiling of ${fob_ceiling:.2f}/MT (Benchmark: ${benchmark_fob:.2f} + {max_variance_pct}%).",
-            dynamic_fob_ceiling=bounds.dynamic_fob_ceiling,
-            landed_cost_at_ceiling=bounds.landed_cost_at_ceiling,
-            dynamic_cif_floor=bounds.dynamic_cif_floor,
+        return _negotiable_violation(
+            f"Supplier FOB ${supplier_fob:.2f}/MT exceeds dynamic ceiling of ${fob_ceiling:.2f}/MT "
+            f"(Benchmark: ${benchmark_fob:.2f} + {max_variance_pct}%).",
+            round_num, max_rounds, bounds,
         )
 
+    # Pre-negotiation screening only (direct evaluate_deal calls with the default round_num=0).
+    # Inside the graph evaluate_risk_node passes round >= 1, where a low bid is countered at the floor instead.
     if round_num == 0 and buyer_cif < cif_floor:
         return DealEvaluation(
             viable=False,
@@ -329,6 +345,7 @@ def evaluate_deal(
         benchmark_fob=benchmark_fob,
         max_variance_pct=campaign.max_variance_from_benchmark_pct,
         round_num=round_num,
+        max_rounds=campaign.max_negotiation_rounds,
         bounds=bounds,
     )
     if constraint_violation:

@@ -43,6 +43,12 @@ from app.agents.finalization import (
 )
 
 
+def is_awaiting_approval(config: dict) -> bool:
+    """True when the thread is paused at the human-approval interrupt."""
+    snapshot = get_trade_graph().get_state(config)
+    return bool(snapshot and snapshot.next and "approval_gate" in snapshot.next)
+
+
 def run_full_autonomous_campaign(campaign_id: str):
     from app.services.campaign_runner import run_full_autonomous_campaign as _runner
     return _runner(campaign_id)

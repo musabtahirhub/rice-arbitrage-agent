@@ -43,3 +43,16 @@ class TradeAuditModel(Base):
     created_at = Column(DateTime, default=_utcnow, nullable=False)
 
     campaign = relationship("CampaignModel", back_populates="trade_audits")
+
+
+class ProcessedInboundEmailModel(Base):
+    """One row per inbound email the desk has claimed. The primary key makes the claim atomic across
+    processes and ingestion paths (Pub/Sub push and IMAP polling), so each email gets one reply."""
+
+    __tablename__ = "processed_inbound_emails"
+
+    message_key = Column(String, primary_key=True)  # RFC 822 Message-ID, else the Gmail message id
+    campaign_id = Column(String, nullable=True)
+    source = Column(String, nullable=False)  # "push" | "poll"
+    status = Column(String, nullable=False, default="processing")  # "processing" | "done"
+    created_at = Column(DateTime, default=_utcnow, nullable=False)

@@ -2,7 +2,7 @@ from typing import Literal, Optional
 from langchain_core.runnables import RunnableConfig
 
 from app.config import settings
-from app.directory import get_suppliers_for_commodity
+from app.directory import resolve_supplier_contact
 from app.logger import get_logger
 from app.market import get_benchmark_rate, estimate_freight
 from app.math_engine import calculate_dynamic_bounds, evaluate_deal
@@ -37,9 +37,7 @@ def _generate_initial_supplier_rfq(
     buffer_usd = campaign.buffer_usd_per_mt if campaign.buffer_usd_per_mt is not None else settings.default_buffer_usd_per_mt
     target_fob_ceiling = round(terms.price_usd_per_mt - freight - buffer_usd - campaign.min_profit_per_mt_soft, 2)
 
-    suppliers = get_suppliers_for_commodity(campaign.commodity)
-    target_supp = suppliers[0] if suppliers else None
-    supp_name = target_supp.name if target_supp else "Asian Rice Exporters"
+    supp_name, _ = resolve_supplier_contact(campaign.commodity)
 
     rfq_prompt = SUPPLIER_RFQ_PROMPT.format(
         desk_name=settings.desk_name,
@@ -76,7 +74,8 @@ def _process_parsed_buyer_terms(
     desk_proposed_rate: float,
     config: Optional[RunnableConfig] = None,
 ) -> dict:
-    buyer_accepted = None
+    # Always written explicitly (never None) so a previous acceptance cannot survive a later counter-offer.
+    buyer_accepted = False
     if terms.is_acceptance or terms.intent == "ACCEPTANCE":
         buyer_accepted = True
         if terms.price_usd_per_mt <= 0.0:

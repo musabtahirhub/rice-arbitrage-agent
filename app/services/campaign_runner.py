@@ -11,7 +11,7 @@ from app.directory import get_buyers_for_commodity, get_suppliers_for_commodity
 from app.models import Campaign
 import app.workflow
 from app.logger import setup_logger
-from app.telemetry import get_langfuse_handler
+from app.telemetry import build_trace_config, flush_telemetry, get_langfuse_handler
 
 logger = setup_logger("arbitrage_desk")
 
@@ -86,8 +86,9 @@ def _append_audit_and_transcript(
     ))
 
 def _resume_graph_if_awaiting_approval(state: dict, config: dict) -> dict:
-    snapshot = app.workflow.get_trade_graph().get_state(config)
-    if snapshot and snapshot.next and "approval_gate" in snapshot.next:
+    # Simulation only: the autonomous runner plays the risk officer. It never dispatches email
+    # (run_full_autonomous_campaign sets skip_email_dispatch), so this cannot confirm a live deal.
+    if app.workflow.is_awaiting_approval(config):
         resume_payload = ApprovalResumeDecision(approved=True, reviewer_notes="Autonomous campaign auto-approval")
         return app.workflow.get_trade_graph().invoke(
             Command(resume=resume_payload.model_dump(exclude_none=True)),
@@ -239,7 +240,10 @@ def _run_concession_loop(
     config: dict,
     db: Session,
 ) -> dict:
-    while state.get("deal_status") not in ["closed", "rejected"]:
+    # Hard cap on top of the graph's own round limit so a parser that never moves the price cannot loop forever.
+    for _ in range(campaign.max_negotiation_rounds + 2):
+        if state.get("deal_status") in ["closed", "rejected"]:
+            break
         action = state.get("action")
         if action in ["ACCEPT_AND_CLOSE", "REJECT_HARD"]:
             break
@@ -353,21 +357,22 @@ def run_full_autonomous_campaign(campaign_id: str, db: Optional[Session] = None)
             raise HTTPException(status_code=404, detail=f"Campaign {campaign_id} not found.")
 
         langfuse_handler = get_langfuse_handler()
-        config = {
-            "configurable": {"thread_id": campaign_id},
-            "callbacks": [langfuse_handler] if langfuse_handler else [],
-            "metadata": {
-                "campaign_id": campaign_id,
-                "mode": "autonomous",
-            },
-            "tags": ["commodity-arbitrage", "autonomous"],
-        }
+        config = build_trace_config(
+            campaign_id,
+            "autonomous-campaign",
+            langfuse_handler,
+            metadata={"mode": "autonomous"},
+            tags=["autonomous"],
+        )
         snapshot = app.workflow.get_trade_graph().get_state(config)
         state = dict(snapshot.values) if snapshot and snapshot.values else {}
         if not state:
             raise HTTPException(status_code=404, detail=f"State for campaign {campaign_id} not found.")
 
         campaign: Campaign = state["campaign"]
+        if isinstance(campaign, dict):
+            campaign = Campaign(**campaign)
+        state["skip_email_dispatch"] = True
         buffer_usd = campaign.buffer_usd_per_mt if campaign.buffer_usd_per_mt is not None else settings.default_buffer_usd_per_mt
         landed_cost_baseline = round(state["benchmark_fob_usd"] + state["freight_cost_usd"] + buffer_usd, 2)
 
@@ -389,8 +394,7 @@ def run_full_autonomous_campaign(campaign_id: str, db: Optional[Session] = None)
         _sync_final_graph_and_db_state(state, db_camp, config, db)
 
         res = _build_autonomous_runner_result(campaign_id, campaign, state, buyers, suppliers)
-        if langfuse_handler:
-            langfuse_handler.flush()
+        flush_telemetry()
         return res
     finally:
         if should_close:

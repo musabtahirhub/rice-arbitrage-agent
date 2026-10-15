@@ -7,7 +7,7 @@ from pathlib import Path
 
 from app.config import settings
 from app.database import init_db
-from app.gmail_client import fetch_latest_messages_by_history, send_gmail_reply, setup_gmail_watch
+from app.gmail_client import fetch_latest_messages_by_history, send_gmail_reply, setup_gmail_watch, stop_gmail_watch
 from app.workflow import setup_checkpointer, get_trade_graph, trade_graph
 from app.telemetry import get_langfuse_handler
 from app.services import gmail_worker
@@ -37,6 +37,18 @@ async def _initialize_gmail_watch(topic: str):
     except Exception as e:
         logger.error(f"[LIFESPAN] Failed to set up Gmail watch on boot: {e}")
 
+async def _stop_leftover_gmail_watch():
+    """In polling mode, stop any Gmail watch left from a push-mode run (watches last up to 7 days),
+    so Pub/Sub stops pushing notifications. Best effort: never blocks startup."""
+    if not settings.google_pubsub_topic:
+        return
+    try:
+        await asyncio.to_thread(stop_gmail_watch)
+        logger.info("[LIFESPAN] Polling mode: stopped any active Gmail push watch for this mailbox.")
+    except Exception as e:
+        logger.warning(f"[LIFESPAN] Polling mode: could not stop Gmail push watch ({e}). Webhook calls are ignored anyway.")
+
+
 def _start_email_worker_if_configured():
     if settings.email_user and settings.email_pass:
         logger.info(f"[LIFESPAN] Email credentials configured ({settings.email_user}). Starting background email polling worker...")
@@ -60,6 +72,9 @@ async def lifespan(app: FastAPI):
     setup_checkpointer()
     worker_task = None
 
+    # Exactly one ingestion path per deployment: push (Pub/Sub webhook) or poll (IMAP).
+    mode = "push" if settings.use_push_webhooks else "poll"
+    logger.info(f"[LIFESPAN] Email ingestion mode: {mode} (USE_PUSH_WEBHOOKS={settings.use_push_webhooks})")
     if settings.use_push_webhooks:
         topic = settings.google_pubsub_topic
         if topic:
@@ -67,6 +82,7 @@ async def lifespan(app: FastAPI):
         else:
             logger.info("[LIFESPAN] Push webhooks enabled (USE_PUSH_WEBHOOKS=True). Polling worker disabled.")
     else:
+        await _stop_leftover_gmail_watch()
         worker_task = _start_email_worker_if_configured()
 
     yield

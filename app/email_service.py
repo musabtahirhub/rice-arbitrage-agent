@@ -3,14 +3,14 @@ import email.header
 import email.utils
 from email.message import EmailMessage
 import imaplib
-import logging
 import re
 import smtplib
 from typing import Optional
 
 from app.config import settings
+from app.logger import get_logger
 
-logger = logging.getLogger("email_service")
+logger = get_logger("arbitrage_desk.email_service")
 
 PROCESSED_MESSAGE_IDS: set[str] = set()
 LAST_OUTBOUND_MESSAGE_ID: Optional[str] = None
@@ -36,8 +36,9 @@ def is_simulated_email(email_addr: str) -> bool:
     addr = (email_addr or "").strip().lower()
     if not addr:
         return True
-    if settings.my_test_email and addr == settings.my_test_email.strip().lower():
-        return False
+    for test_inbox in (settings.my_test_email, settings.my_test_supplier_email):
+        if test_inbox and addr == test_inbox.strip().lower():
+            return False
     if settings.email_user and addr == settings.email_user.strip().lower():
         return False
     return any(addr.endswith(d) for d in SIMULATED_DOMAINS)

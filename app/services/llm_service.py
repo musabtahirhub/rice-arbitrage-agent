@@ -235,13 +235,30 @@ def _extract_terms_via_gemini_llm(
         return None
 
 
+# Explicit acceptance phrases only. Generic trade words ("confirm your price", "order", "deal",
+# "allocation") appear in nearly every counter-offer and must not be read as acceptance.
+_ACCEPTANCE_RE = re.compile(
+    r"\b(?:we|i)\s+(?:hereby\s+)?accept\b"
+    r"|\baccepted\b"
+    r"|\bagreed\b"
+    r"|\bwe\s+agree\b"
+    r"|\b(?:we\s+)?confirm(?:ed)?\s+(?:the|this|our|your)\s+(?:order|deal|offer|contract|purchase)\b"
+    r"|\b(?:please\s+)?proceed\s+with\s+(?:the|this)\s+(?:order|deal|contract|shipment)\b",
+    re.IGNORECASE,
+)
+_NEGATED_ACCEPTANCE_RE = re.compile(
+    r"\b(?:not|cannot|can't|unable\s+to|won't|will\s+not|do\s+not|don't)\s+(?:\w+\s+){0,2}(?:accept|agree|proceed|confirm)",
+    re.IGNORECASE,
+)
+
+
 def _extract_price_and_intent(raw_text: str, last_proposed_price: float) -> tuple[float, bool, str]:
     p_match = re.search(r"(?:USD|US\$|\$)\s*([\d,]+(?:\.\d+)?)", raw_text, re.IGNORECASE)
     if not p_match:
         p_match = re.search(r"([\d,]+(?:\.\d+)?)\s*(?:USD|US\$|\$|per\s*MT|/\s*MT)", raw_text, re.IGNORECASE)
     price = float(p_match.group(1).replace(",", "")) if p_match else 0.0
 
-    is_acceptance = bool(re.search(r"\b(accept|agreed|agreement|confirm|proceed|deal|order|allocation)\b", raw_text, re.IGNORECASE))
+    is_acceptance = bool(_ACCEPTANCE_RE.search(raw_text)) and not _NEGATED_ACCEPTANCE_RE.search(raw_text)
     intent = "ACCEPTANCE" if is_acceptance else ("COUNTER_OFFER" if price > 0 else "INQUIRY")
     if price <= 0.0 and is_acceptance:
         price = last_proposed_price
@@ -255,7 +272,17 @@ def _extract_quantity_from_text(raw_text: str, default_volume_mt: float) -> floa
 
 
 def _extract_incoterm_and_port(raw_text: str, role: str) -> tuple[str, str]:
-    incoterm = "CIF" if "cif" in raw_text.lower() else ("FOB" if "fob" in raw_text.lower() else ("CIF" if role == "buyer" else "FOB"))
+    has_cif = re.search(r"\bCIF\b", raw_text, re.IGNORECASE) is not None
+    has_fob = re.search(r"\bFOB\b", raw_text, re.IGNORECASE) is not None
+    default_incoterm = "CIF" if role == "buyer" else "FOB"
+    if has_cif and has_fob:
+        incoterm = default_incoterm
+    elif has_cif:
+        incoterm = "CIF"
+    elif has_fob:
+        incoterm = "FOB"
+    else:
+        incoterm = default_incoterm
     port = settings.default_destination_port if role == "buyer" else settings.default_origin_port
 
     text_lower = raw_text.lower()

@@ -111,7 +111,7 @@ class ParsedBuyerTermsUpdate(BaseModel):
     """State update from ``_process_parsed_buyer_terms``."""
     buyer_terms: Any  # ParsedEmail instance
     pipeline_step: int = 2
-    buyer_accepted: Optional[bool] = None
+    buyer_accepted: bool = False
     target_fob_ceiling: Optional[float] = None
     supplier_draft: Optional[str] = None
 
@@ -149,6 +149,7 @@ class CounterBuyerUpdate(BaseModel):
     deal_status: str = "counter_sent"
     buyer_draft: str = ""
     last_counter_cif_usd: Optional[float] = None
+    override_cif_price: Optional[float] = None  # always dumped as None to consume a one-shot override
 
 
 class CounterSupplierUpdate(BaseModel):
