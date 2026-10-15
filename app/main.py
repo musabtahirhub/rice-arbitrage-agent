@@ -96,12 +96,20 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-cors_list = settings.cors_origins if isinstance(settings.cors_origins, list) else [s.strip() for s in settings.cors_origins.split(",")]
+cors_list = settings.cors_origins
+cors_allows_any_origin = "*" in cors_list
+if cors_allows_any_origin:
+    logger.warning(
+        "[CORS] CORS_ORIGINS contains '*': any website can call this API. Credentials are disabled for "
+        "wildcard CORS; list explicit origins instead."
+    )
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_list,
-    allow_credentials=True,
+    # With "*", Starlette echoes the caller's origin when credentials are allowed, i.e. credentialed
+    # access for every site. Only allow credentials for explicit origin lists.
+    allow_credentials=not cors_allows_any_origin,
     allow_methods=["*"],
     allow_headers=["*"],
 )

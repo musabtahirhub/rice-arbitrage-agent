@@ -1,7 +1,9 @@
-from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import field_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+from pydantic import Field, field_validator
 import json
-from typing import Any
+from typing import Annotated, Any
+
+DEFAULT_CORS_ORIGINS = ("http://localhost:3000",)
 
 
 class Settings(BaseSettings):
@@ -45,7 +47,11 @@ class Settings(BaseSettings):
 
     port: int = 8000
     host: str = "127.0.0.1"
-    cors_origins: list[str] | str = ["*"]
+    # Explicit local-dev origin by default, never the "*" wildcard. The bundled UI is served by this app
+    # (same origin) and needs no CORS entry.
+    # NoDecode: hand the raw env string to assemble_cors_origins (it accepts JSON, comma-separated or a
+    # single origin) instead of letting pydantic-settings JSON-decode it first and fail on "a.com,b.com".
+    cors_origins: Annotated[list[str], NoDecode] = Field(default_factory=lambda: list(DEFAULT_CORS_ORIGINS))
     database_url: str = "postgresql://postgres:postgres@localhost:5432/arbitrage_desk"
     checkpointer_backend: str = "memory"
     checkpointer_allow_volatile_fallback: bool = False
@@ -90,14 +96,14 @@ class Settings(BaseSettings):
     @field_validator("cors_origins", mode="before")
     @classmethod
     def assemble_cors_origins(cls, v: Any) -> list[str]:
-        # 1. If unset (None), fallback to default wildcard
+        # 1. If unset (None), fall back to the explicit default, NOT the "*" wildcard
         if v is None:
-            return ["*"]
+            return list(DEFAULT_CORS_ORIGINS)
 
-        # 2. String input handling
+        # 2. String input handling (e.g. from .env)
         if isinstance(v, str):
             v_trimmed = v.strip()
-            # Explicitly empty string -> allow no origins
+            # Explicitly empty string (CORS_ORIGINS="") -> block all cross-origin requests
             if not v_trimmed:
                 return []
 
