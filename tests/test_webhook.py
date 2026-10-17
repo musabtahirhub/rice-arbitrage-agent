@@ -11,11 +11,11 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 from starlette.testclient import TestClient
 
-import app.agents.workflow
-import app.db
+import app.db.database
+import app.graph.workflow
 import app.main
 from app.config import settings
-from app.db import Base, CampaignModel, TradeAuditModel
+from app.db.db_models import Base, CampaignModel, TradeAuditModel
 from app.models import Campaign
 
 # Setup isolated test database and test checkpointer
@@ -27,8 +27,8 @@ test_engine = create_engine(
 TestSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=test_engine)
 Base.metadata.create_all(bind=test_engine)
 
-app.db.engine = test_engine
-app.db.SessionLocal = TestSessionLocal
+app.db.database.engine = test_engine
+app.db.database.SessionLocal = TestSessionLocal
 
 
 def _override_get_db():
@@ -39,15 +39,14 @@ def _override_get_db():
         db.close()
 
 
-app.main.app.dependency_overrides[app.db.get_db] = _override_get_db
+app.main.app.dependency_overrides[app.db.database.get_db] = _override_get_db
 
 test_checkpointer = MemorySaver()
 test_checkpointer.setup = lambda: None
-app.agents.workflow.checkpointer = test_checkpointer
-app.agents.workflow.trade_graph = app.agents.workflow.build_trade_graph(checkpointer=test_checkpointer)
+app.graph.workflow.checkpointer = test_checkpointer
+app.graph.workflow.trade_graph = app.graph.workflow.build_trade_graph(checkpointer=test_checkpointer)
 
-from app.services.gmail_inbox import fetch_latest_messages_by_history, setup_gmail_watch
-from app.services.gmail_send import send_gmail_reply
+from app.services.mail.gmail_client import fetch_latest_messages_by_history, send_gmail_reply, setup_gmail_watch
 
 PASS_COUNT = 0
 FAIL_COUNT = 0
@@ -89,7 +88,7 @@ def test_gmail_client_watch():
     mock_watch.execute.return_value = {"historyId": "12345", "expiration": "1710000000"}
     mock_service.users().watch.return_value = mock_watch
 
-    with patch("app.services.gmail_inbox.get_gmail_service", return_value=mock_service):
+    with patch("app.services.mail.gmail_client.get_gmail_service", return_value=mock_service):
         topic = "projects/arbitrage-prod/topics/gmail-inbox-watch"
         res = setup_gmail_watch(topic)
         assert_true(res.get("historyId") == "12345", "setup_gmail_watch returns historyId from Gmail API")
@@ -101,7 +100,7 @@ def test_gmail_client_watch():
 
 
 def test_gmail_client_history_fetch():
-    from app.services.gmail_processed_cache import PROCESSED_GMAIL_MESSAGE_IDS
+    from app.services.mail.gmail_client import PROCESSED_GMAIL_MESSAGE_IDS
     PROCESSED_GMAIL_MESSAGE_IDS.clear()
     print("\n--- 3. Testing Gmail Service fetch_latest_messages_by_history ---")
     mock_service = MagicMock()
@@ -146,7 +145,7 @@ def test_gmail_client_history_fetch():
     }
     mock_service.users().messages().get.return_value = mock_msg_get
 
-    with patch("app.services.gmail_inbox.get_gmail_service", return_value=mock_service):
+    with patch("app.services.mail.gmail_client.get_gmail_service", return_value=mock_service):
         messages = fetch_latest_messages_by_history("101")
         assert_true(len(messages) == 1, "fetch_latest_messages_by_history returned 1 message")
         msg = messages[0]
@@ -167,7 +166,7 @@ def test_gmail_client_send_reply():
     mock_send.execute.return_value = {"id": "outbound_123", "threadId": "thread_abc"}
     mock_service.users().messages().send.return_value = mock_send
 
-    with patch("app.services.gmail_send.get_gmail_service", return_value=mock_service):
+    with patch("app.services.mail.gmail_client.get_gmail_service", return_value=mock_service):
         raw_draft = (
             "SUBJECT: Re: Trade Confirmation — Basmati 1121\n\n"
             "BODY: We confirm the negotiated terms of USD 1,020/MT CIF Jebel Ali."
@@ -238,7 +237,7 @@ def test_webhook_immediate_response_and_background():
         "anchor_cif_usd": 1080.0,
         "audit_transcript": [],
     }
-    app.agents.workflow.trade_graph.invoke(initial_state, config={"configurable": {"thread_id": camp_id}})
+    app.graph.workflow.trade_graph.invoke(initial_state, config={"configurable": {"thread_id": camp_id}})
 
     # Mock fetch_latest_messages_by_history returning a buyer counter
     mock_incoming_messages = [
@@ -267,8 +266,8 @@ def test_webhook_immediate_response_and_background():
         "subscription": "projects/arbitrage-desk/subscriptions/gmail-sub",
     }
 
-    with patch("app.services.inbound_push.fetch_latest_messages_by_history", return_value=mock_incoming_messages), \
-         patch("app.services.email_transport.send_gmail_reply", return_value=True) as mock_send_reply:
+    with patch("app.services.mail.gmail_worker.fetch_latest_messages_by_history", return_value=mock_incoming_messages), \
+         patch("app.services.mail.gmail_client.send_gmail_reply", return_value=True) as mock_send_reply:
 
         # Send push webhook to POST /api/webhooks/gmail
         res = client.post("/api/webhooks/gmail", json=payload)
@@ -331,8 +330,8 @@ def test_webhook_ignores_desk_own_email():
     pubsub_json_data = json.dumps({"historyId": "112233"})
     data_b64 = base64.b64encode(pubsub_json_data.encode("utf-8")).decode("utf-8")
 
-    with patch("app.services.inbound_push.fetch_latest_messages_by_history", return_value=desk_msg), \
-         patch("app.services.email_transport.send_gmail_reply") as mock_send:
+    with patch("app.services.mail.gmail_worker.fetch_latest_messages_by_history", return_value=desk_msg), \
+         patch("app.services.mail.gmail_client.send_gmail_reply") as mock_send:
 
         res = client.post("/api/webhooks/gmail", json={"message": {"data": data_b64}})
         assert_true(res.status_code == 200, "Desk own message webhook returned 200")
@@ -363,7 +362,7 @@ def test_webhook_ignores_bounce_messages():
     pubsub_json_data = json.dumps({"historyId": "445566"})
     data_b64 = base64.b64encode(pubsub_json_data.encode("utf-8")).decode("utf-8")
 
-    with patch("app.services.inbound_push.fetch_latest_messages_by_history", return_value=bounce_msg):
+    with patch("app.services.mail.gmail_worker.fetch_latest_messages_by_history", return_value=bounce_msg):
         res = client.post("/api/webhooks/gmail", json={"message": {"data": data_b64}})
         assert_true(res.status_code == 200, "Bounce webhook returned 200")
 

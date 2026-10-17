@@ -2,13 +2,12 @@ import sys
 import time
 import uuid
 
-from app.agents.state import DealState
-from app.agents.workflow import get_trade_graph
 from app.config import settings
-from app.models import Campaign, ParsedEmail
-from app.services.imap import check_latest_reply, get_unseen_message_ids
-from app.services.smtp import send_email
-from app.utils.email_text import make_message_id, split_subject_and_body
+from app.graph.workflow import get_trade_graph
+from app.models import Campaign, DealState, ParsedEmail
+from app.services.mail.email_utils import make_message_id, split_subject_and_body
+from app.services.mail.imap import check_latest_reply, get_unseen_message_ids
+from app.services.mail.smtp import send_email
 
 
 def run_live_email_negotiation(recipient_email: str | None = None):

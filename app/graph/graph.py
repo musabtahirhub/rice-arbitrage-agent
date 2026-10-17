@@ -4,17 +4,20 @@ from typing import Literal
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.graph import END, StateGraph
 
-from app.agents.nodes.approval import approval_gate_node
-from app.agents.nodes.counter_buyer import counter_buyer_node
-from app.agents.nodes.counter_supplier import counter_supplier_node
-from app.agents.nodes.finalization import confirm_deal_node, reject_deal_node
-from app.agents.nodes.intake import parse_incoming_email_node
-from app.agents.nodes.outreach import proactive_outreach_node
-from app.agents.nodes.risk import evaluate_risk_node, fetch_market_data_node, route_after_evaluation
-from app.agents.state import DealState, campaign_id_of, is_outreach_started
+from app.graph.agents.buyer_agent import counter_buyer_node, proactive_outreach_node
+from app.graph.agents.finalization import approval_gate_node, confirm_deal_node, reject_deal_node
+from app.graph.agents.risk_worker import (
+    evaluate_risk_node,
+    fetch_market_data_node,
+    parse_incoming_email_node,
+    route_after_evaluation,
+)
+from app.graph.agents.supplier_agent import counter_supplier_node
 from app.logger import get_logger
+from app.models import DealState, campaign_id_of, is_outreach_started
 
 logger = get_logger("arbitrage_desk.workflow")
+
 
 # Our Pydantic models stored in DealState. LangGraph only deserializes allow-listed types from
 # checkpoints (unregistered types will be blocked in a future version), so register them here.

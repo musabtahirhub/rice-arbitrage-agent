@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 from typing import Annotated, Any
 
-from pydantic import Field, field_validator
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -20,11 +20,18 @@ class Settings(BaseSettings):
     gemini_api_key: str = ""
     gemini_model: str = "gemini-2.5-flash"
     llm_temperature: float = 0.2
+    # Bound every Gemini call: the client defaults (no timeout, 6 retries) can stall a negotiation turn for minutes.
+    llm_timeout_seconds: float = 30.0
+    llm_max_retries: int = 2
 
     # Langfuse Observability
     langfuse_public_key: str = ""
     langfuse_secret_key: str = ""
-    langfuse_host: str = "https://cloud.langfuse.com"
+    # Langfuse SDK v3+ calls this LANGFUSE_BASE_URL; LANGFUSE_HOST is the older name. Accept both.
+    langfuse_host: str = Field(
+        default="https://cloud.langfuse.com",
+        validation_alias=AliasChoices("langfuse_host", "langfuse_base_url"),
+    )
 
     smtp_server: str = "smtp.gmail.com"
     smtp_port: int = 587
@@ -56,6 +63,8 @@ class Settings(BaseSettings):
     # single origin) instead of letting pydantic-settings JSON-decode it first and fail on "a.com,b.com".
     cors_origins: Annotated[list[str], NoDecode] = Field(default_factory=lambda: list(DEFAULT_CORS_ORIGINS))
     database_url: str = "postgresql://postgres:postgres@localhost:5432/arbitrage_desk"
+    # Fail fast when Postgres is unreachable instead of blocking startup and requests indefinitely.
+    database_connect_timeout_seconds: int = 5
     checkpointer_backend: str = "memory"
     checkpointer_allow_volatile_fallback: bool = False
     log_level: str = "INFO"

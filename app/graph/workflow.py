@@ -6,14 +6,17 @@ tests replace ``trade_graph`` / ``checkpointer`` on this module.
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.postgres import PostgresSaver
 
-from app.agents.graph import build_checkpoint_serde, build_trade_graph
 from app.config import settings
-from app.db import pool
+from app.db.database import pool
+from app.graph.graph import build_checkpoint_serde, build_trade_graph
 from app.logger import get_logger
 
 logger = get_logger("arbitrage_desk.workflow")
 
+
 checkpointer = InMemorySaver(serde=build_checkpoint_serde())
+
+
 trade_graph = build_trade_graph(checkpointer=checkpointer)
 
 

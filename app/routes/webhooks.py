@@ -4,13 +4,12 @@ import json
 
 from fastapi import APIRouter, BackgroundTasks, Request
 
-from app.api.schemas import WebhookResponse
 from app.config import settings
 from app.logger import get_logger
-from app.services.inbound_push import process_incoming_gmail_event
+from app.schemas import WebhookResponse
+from app.services.mail.gmail_worker import process_incoming_gmail_event
 
 logger = get_logger("arbitrage_desk")
-
 router = APIRouter()
 
 

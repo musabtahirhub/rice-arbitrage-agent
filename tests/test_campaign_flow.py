@@ -6,10 +6,10 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-import app.agents.workflow
-import app.db
+import app.db.database
+import app.graph.workflow
 import app.main
-from app.db import Base, CampaignModel, TradeAuditModel
+from app.db.db_models import Base, CampaignModel, TradeAuditModel
 
 # Setup isolated test database and test checkpointer
 test_engine = create_engine(
@@ -20,8 +20,8 @@ test_engine = create_engine(
 TestSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=test_engine)
 Base.metadata.create_all(bind=test_engine)
 
-app.db.engine = test_engine
-app.db.SessionLocal = TestSessionLocal
+app.db.database.engine = test_engine
+app.db.database.SessionLocal = TestSessionLocal
 
 
 def _override_get_db():
@@ -32,22 +32,20 @@ def _override_get_db():
         db.close()
 
 
-app.main.app.dependency_overrides[app.db.get_db] = _override_get_db
+app.main.app.dependency_overrides[app.db.database.get_db] = _override_get_db
 
 test_checkpointer = MemorySaver()
 test_checkpointer.setup = lambda: None
-app.agents.workflow.checkpointer = test_checkpointer
-app.agents.workflow.trade_graph = app.agents.workflow.build_trade_graph(checkpointer=test_checkpointer)
-trade_graph = app.agents.workflow.trade_graph
+app.graph.workflow.checkpointer = test_checkpointer
+app.graph.workflow.trade_graph = app.graph.workflow.build_trade_graph(checkpointer=test_checkpointer)
+trade_graph = app.graph.workflow.trade_graph
 
-from app.agents.state import DealState
-from app.models import Campaign, ParsedEmail
-from app.services.deal_evaluation import evaluate_deal
-from app.services.deal_strategy import evaluate_deal_strategy
-from app.services.directory import get_buyers_for_commodity, get_suppliers_for_commodity
-from app.services.freight import estimate_freight
-from app.services.market import get_benchmark_rate
-from app.services.pricing import calculate_dynamic_bounds, calculate_landed_cost, calculate_net_margin
+from app.directory import get_buyers_for_commodity, get_suppliers_for_commodity
+from app.models import Campaign, DealState, ParsedEmail
+from app.pricing.evaluation import evaluate_deal
+from app.pricing.formulas import calculate_dynamic_bounds, calculate_landed_cost, calculate_net_margin
+from app.pricing.market import estimate_freight, get_benchmark_rate
+from app.pricing.strategy import evaluate_deal_strategy
 
 PASS_COUNT = 0
 FAIL_COUNT = 0
@@ -73,8 +71,7 @@ def test_market_and_directory():
     assert_true(len(suppliers) >= 1, "Found matching Basmati suppliers")
     assert_true(any("Indus Rice" in s.name for s in suppliers), "Indus Rice Mills found in directory")
 
-    from app.services.market import fetch_live_market_data, parse_thai_rice_html
-    from app.services.market_cache import CACHE_FILE
+    from app.pricing.market import CACHE_FILE, fetch_live_market_data, parse_thai_rice_html
     rates = fetch_live_market_data()
     assert_true(len(rates) >= 5, "Market rates dictionary loaded")
     assert_true(CACHE_FILE.exists(), "market_cache.json created on disk")
@@ -96,7 +93,7 @@ def test_market_and_directory():
     assert_true(parsed.get("thai white 5%") == 496.0, f"HTML parser extracted Thai White 5%: {parsed.get('thai white 5%')}")
     assert_true(parsed.get("pathumthani fragrant") == 478.0, "HTML parser extracted Pathumthani Fragrant")
 
-    from app.services.market import parse_yahoo_finance_json
+    from app.pricing.market import parse_yahoo_finance_json
     sample_yahoo = {
         "chart": {
             "result": [{
@@ -606,12 +603,11 @@ def test_autonomous_end_to_end_campaign():
 
 def test_dynamic_llm_email_generation_and_transport():
     print("\n--- 8. Testing Dynamic LLM Email Generation & Transport Bridge ---")
-    from app.agents.nodes.counter_buyer import counter_buyer_node
-    from app.agents.nodes.counter_supplier import counter_supplier_node
-    from app.agents.nodes.finalization import confirm_deal_node, reject_deal_node
-    from app.agents.nodes.outreach import generate_proactive_sco_draft
-    from app.services.smtp import send_email
-    from app.utils.email_text import split_subject_and_body
+    from app.graph.agents.buyer_agent import counter_buyer_node, generate_proactive_sco_draft
+    from app.graph.agents.finalization import confirm_deal_node, reject_deal_node
+    from app.graph.agents.supplier_agent import counter_supplier_node
+    from app.services.mail.email_utils import split_subject_and_body
+    from app.services.mail.smtp import send_email
 
     sample_strict = """SUBJECT: Commercial Firm Offer — Basmati 1121 CIF Jebel Ali
 BODY:
@@ -719,8 +715,11 @@ Please provide earliest shipping readiness for 500 MT."""
     rd_sub, _ = split_subject_and_body(rd_res["buyer_draft"])
     assert_true(len(rd_sub) > 5, f"Decline notice subject: '{rd_sub}'")
 
-    from app.utils.email_filters import is_automated_or_bounce_message, is_simulated_email
-    from app.utils.email_text import normalize_thread_subject
+    from app.services.mail.email_utils import (
+        is_automated_or_bounce_message,
+        is_simulated_email,
+        normalize_thread_subject,
+    )
 
     assert_true(is_simulated_email("export@indusrice.pk"), "indusrice.pk recognized as simulated domain")
     assert_true(is_simulated_email("sales@thaigrain.co.th"), "thaigrain.co.th recognized as simulated domain")
@@ -746,8 +745,8 @@ Please provide earliest shipping readiness for 500 MT."""
     )
     assert_true(sent_res is True, "send_email executes with threading headers without exception in mock/live mode")
 
-    from app.services.email_matcher import match_email_to_campaign
-    from app.services.imap import EmailReply
+    from app.services.mail.email_matcher import match_email_to_campaign
+    from app.services.mail.imap import EmailReply
 
     reply_mock = EmailReply(
         body="We counter at USD 1020/MT CIF Jebel Ali for 500 MT Basmati 1121.",

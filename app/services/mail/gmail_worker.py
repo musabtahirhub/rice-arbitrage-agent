@@ -1,152 +1,203 @@
-"""Run one graph turn for an inbound email and send whatever replies it drafted.
+"""Inbound email ingestion: Gmail push (Pub/Sub historyId) and IMAP polling.
 
-Only reached through inbound_dedupe.process_inbound_message_transaction, which guarantees each email
-is handled once.
+Only Gmail Primary-inbox mail is processed (see email_utils.is_primary_inbox_message).
 """
+import asyncio
+from typing import Optional
+
 from sqlalchemy.orm import Session
 
-from app.agents import workflow
+import app.db.database
 from app.config import settings
-from app.db import CampaignModel
-from app.logger import get_logger
-from app.models import Campaign, ParsedEmail
-from app.services.audit import add_trade_audit, desk_party, record_exchange
-from app.services.inbound_replies import send_buyer_reply, send_supplier_reply
-from app.services.inbound_state import (
-    DealContacts,
-    InboundEmail,
-    build_inbound_config,
-    classify_sender_role,
-    counterparty_label,
-    load_campaign_state,
-    prepare_graph_state,
-    record_contacts_in_state,
-    resolve_deal_contacts,
+from app.db.db_models import CampaignModel
+from app.directory import (
+    get_buyers_for_commodity,
 )
-from app.services.market import get_benchmark_rate
-from app.services.simulated_emails import build_supplier_quote_email
-from app.utils.telemetry import flush_telemetry
+from app.logger import get_logger
+from app.models import CLOSED_DEAL_STATUSES
+from app.services.mail.email_matcher import find_open_campaign
+from app.services.mail.email_utils import (
+    get_desk_email_addresses,
+    is_automated_or_bounce_message,
+    is_from_desk,
+    is_primary_inbox_message,
+)
+from app.services.mail.gmail_client import fetch_latest_messages_by_history, mark_gmail_message_processed
+from app.services.mail.imap import EmailReply, check_latest_reply, initialize_unseen_snapshot
+from app.services.mail.inbound_state import InboundEmail
+from app.services.mail.inbound_turn import process_inbound_message_transaction
 
 logger = get_logger("arbitrage_desk")
 
 
-def _simulate_supplier_quote(state: dict, campaign_id: str, contacts: DealContacts, db: Session) -> None:
-    """SIMULATE_SUPPLIER demo mode: fabricate a benchmark-priced supplier quote if none exists yet."""
-    if state.get("supplier_terms") is not None:
-        return
-    camp: Campaign = state["campaign"]
-    benchmark_fob = state.get("benchmark_fob_usd") or get_benchmark_rate(camp.commodity)
-    logger.info(
-        f"[SUPPLIER AGENT] Securing allocation for campaign '{campaign_id}': "
-        f"{camp.target_volume_mt:,.0f} MT {camp.commodity} @ USD {benchmark_fob:.2f}/MT FOB {camp.origin_port_default}"
-    )
-    state["supplier_terms"] = ParsedEmail(
-        sender_role="supplier",
-        commodity=camp.commodity,
-        quantity_mt=camp.target_volume_mt,
-        price_usd_per_mt=benchmark_fob,
-        incoterm="FOB",
-        port=camp.origin_port_default,
-        payment_terms=settings.default_payment_terms,
-    )
-    record_exchange(
-        state, db, campaign_id,
-        turn=state.get("negotiation_round", 0),
-        sender=f"{contacts.supplier_name} <{contacts.supplier_email}>",
-        recipient=desk_party(),
-        role="supplier",
-        action="INCOMING_SUPPLIER_QUOTE",
-        subject=f"Quotation — {camp.commodity} FOB {camp.origin_port_default}",
-        message=build_supplier_quote_email(contacts.supplier_name, contacts.supplier_email, camp, benchmark_fob),
-        direction="INBOUND",
-        counterparty_price=benchmark_fob,
+LAST_SEEN_HISTORY_ID: Optional[str] = None
+
+
+GMAIL_EVENT_LOCK = asyncio.Lock()
+
+
+def seed_history_cursor(history_id: Optional[str]) -> None:
+    """Start listing from the watch's historyId (set at startup when the watch is registered)."""
+    global LAST_SEEN_HISTORY_ID
+    if history_id:
+        LAST_SEEN_HISTORY_ID = str(history_id)
+
+
+def _push_message_to_inbound_email(msg_data: dict) -> InboundEmail:
+    return InboundEmail(
+        body=msg_data.get("body") or "",
+        sender=msg_data.get("From") or "",
+        subject=msg_data.get("Subject") or "",
+        message_id=msg_data.get("Message-ID") or "",
+        in_reply_to=msg_data.get("In-Reply-To") or "",
+        references=msg_data.get("References") or "",
+        thread_id=msg_data.get("threadId") or "",
     )
 
 
-def _record_inbound_email(updated_state: dict, campaign_id: str, role: str, sender_label: str, inbound: InboundEmail,
-                          db: Session) -> None:
-    camp: Campaign = updated_state["campaign"]
-    terms = updated_state.get("supplier_terms" if role == "supplier" else "buyer_terms")
-    default_sub = (
-        f"Re: {camp.commodity} FOB {camp.origin_port_default}" if role == "supplier"
-        else f"Re: {camp.commodity} CIF {camp.destination_port}"
-    )
-    record_exchange(
-        updated_state, db, campaign_id,
-        turn=updated_state.get("negotiation_round", 1),
-        sender=sender_label,
-        recipient=desk_party(),
-        role=role,
-        action="INCOMING_SUPPLIER_QUOTE" if role == "supplier" else "INCOMING_COUNTER",
-        subject=inbound.subject or default_sub,
-        message=inbound.body,
-        direction="INBOUND",
-        counterparty_price=terms.price_usd_per_mt if terms else None,
-        net_spread=updated_state.get("net_spread_usd"),
-    )
+def _should_skip_message(msg_data: dict, inbound: InboundEmail, desk_emails: set[str]) -> bool:
+    if not is_primary_inbox_message(msg_data.get("labelIds")):
+        logger.debug(f"Skipping non-primary inbox message: {msg_data.get('id')}")
+        return True
+    if is_from_desk(inbound.sender, desk_emails):
+        logger.info(f"[GMAIL EVENT] Ignoring message from desk's own email: {inbound.sender}")
+        return True
+    if is_automated_or_bounce_message(inbound.sender, inbound.subject):
+        logger.info(
+            f"[GMAIL EVENT] Ignoring automated/bounce message from {inbound.sender} | Subject: '{inbound.subject}'"
+        )
+        return True
+    return False
 
 
-def _record_inbound_while_awaiting_approval(
-    db_camp: CampaignModel, role: str, inbound: InboundEmail, db: Session
-) -> None:
-    logger.warning(
-        f"[GMAIL EVENT] Campaign {db_camp.id} is awaiting human approval; inbound {role} email from "
-        f"'{inbound.sender}' recorded but not run through the graph (it would bypass the pending approval)."
-    )
-    add_trade_audit(db, db_camp.id, role, inbound.body, "INBOUND")
-    db.commit()
-
-
-def _send_turn_replies(updated_state: dict, had_supplier_terms: bool, db_camp: CampaignModel, contacts: DealContacts,
-                       inbound: InboundEmail, role: str, db: Session, use_gmail_api: bool) -> None:
-    curr_round = updated_state.get("negotiation_round", 1)
-    # Gmail thread ids only belong to the thread of the counterparty who wrote in.
-    send_supplier_reply(
-        updated_state, had_supplier_terms, db_camp.id, contacts, inbound.message_id,
-        inbound.thread_id if role == "supplier" else "", curr_round, db, use_gmail_api,
-    )
-    send_buyer_reply(
-        updated_state, db_camp.id, contacts,
-        inbound.thread_id if role == "buyer" else (updated_state.get("gmail_thread_id") or ""),
-        curr_round, db, use_gmail_api,
-    )
-
-
-def run_inbound_turn(
-    db_camp: CampaignModel, inbound: InboundEmail, desk_emails: set[str], db: Session, use_gmail_api: bool
-) -> None:
-    config = build_inbound_config(db_camp)
-    state = load_campaign_state(db_camp, config)
-    camp: Campaign = state["campaign"]
-    role = classify_sender_role(inbound.sender, state, camp.commodity)
-
-    if workflow.is_awaiting_approval(config):
-        _record_inbound_while_awaiting_approval(db_camp, role, inbound, db)
+def _handle_single_push_message(msg_data: dict, desk_emails: set[str]) -> None:
+    """Run one fetched Gmail message through the graph, unless it is filtered out. Raises on failure."""
+    inbound = _push_message_to_inbound_email(msg_data)
+    if _should_skip_message(msg_data, inbound, desk_emails):
         return
 
-    state = prepare_graph_state(state, inbound, role)
-    contacts = resolve_deal_contacts(camp, inbound.sender, desk_emails, state, role)
-    record_contacts_in_state(state, contacts)
-    if role == "buyer" and settings.simulate_supplier:
-        _simulate_supplier_quote(state, db_camp.id, contacts, db)
-    had_supplier_terms = bool(state.get("supplier_terms"))
-
-    updated_state = workflow.get_trade_graph().invoke(state, config=config)
-    flush_telemetry()
-    awaiting_approval = workflow.mark_pending_approval(config, updated_state)
-
-    sender_label = counterparty_label(contacts, role, inbound.sender)
-    _record_inbound_email(updated_state, db_camp.id, role, sender_label, inbound, db)
-
-    if awaiting_approval:
-        logger.info(f"[GMAIL EVENT] Campaign {db_camp.id} is awaiting human approval. Halting outbound dispatch.")
-    else:
-        _send_turn_replies(updated_state, had_supplier_terms, db_camp, contacts, inbound, role, db, use_gmail_api)
-
-    deal_status = updated_state.get("deal_status")
-    db_camp.deal_status = deal_status or db_camp.deal_status
-    db.commit()
     logger.info(
-        f"[GMAIL EVENT] Campaign {db_camp.id} updated to status: {deal_status} "
-        f"(action: {updated_state.get('action')}, role: {role})"
+        f"[GMAIL EVENT] Inbound email detected from '{inbound.sender}' | Subject: '{inbound.subject}' | "
+        f"Message-ID: '{inbound.message_id}'"
     )
+    with app.db.database.SessionLocal() as db:
+        db_camp = find_open_campaign(inbound.subject, inbound.body, inbound.sender, db)
+        if db_camp:
+            logger.info(f"[GMAIL EVENT] Processing inbound email for campaign: {db_camp.id}")
+            process_inbound_message_transaction(db_camp, inbound, desk_emails, db, use_gmail_api=True)
+
+
+def _is_stale_history_id(new_history_id: str, cursor: Optional[str]) -> bool:
+    """True when a notification's historyId is not newer than the cursor we've already listed from."""
+    if not (new_history_id and cursor):
+        return False
+    try:
+        return int(new_history_id) <= int(cursor)
+    except ValueError:
+        return False
+
+
+async def _fetch_new_messages(history_id: str) -> list[dict]:
+    """Messages since the cursor; advances the cursor. Holds the lock so the cursor only moves forward."""
+    global LAST_SEEN_HISTORY_ID
+    async with GMAIL_EVENT_LOCK:
+        cursor = LAST_SEEN_HISTORY_ID
+        new_history_id = str(history_id) if history_id else ""
+        logger.info(
+            f"[GMAIL EVENT] Processing incoming Gmail event: new_history_id='{new_history_id}', "
+            f"LAST_SEEN_HISTORY_ID='{cursor}'"
+        )
+        if _is_stale_history_id(new_history_id, cursor):
+            # Pub/Sub redelivers backlogs out of order. Listing from the newer cursor already covered
+            # everything up to this id, so re-listing from an older cursor would only re-fetch old mail.
+            logger.info(
+                f"[GMAIL EVENT] Skipping stale notification historyId='{new_history_id}' "
+                f"(cursor already at '{cursor}')."
+            )
+            return []
+        try:
+            messages = await asyncio.to_thread(fetch_latest_messages_by_history, cursor or new_history_id or "")
+        except Exception as e:
+            logger.error(
+                f"[GMAIL EVENT ERROR] Failed fetching messages for history_id {history_id}: {e}", exc_info=True
+            )
+            return []
+        if new_history_id:
+            LAST_SEEN_HISTORY_ID = new_history_id  # only reached when new > cursor: never moves backwards
+        return messages
+
+
+async def process_incoming_gmail_event(history_id: str) -> None:
+    messages = await _fetch_new_messages(history_id)
+    if not messages:
+        logger.info(f"[GMAIL EVENT] No new messages returned for history_id='{history_id}'")
+        return
+
+    desk_emails = get_desk_email_addresses()
+    for msg_data in messages:
+        try:
+            await asyncio.to_thread(_handle_single_push_message, msg_data, desk_emails)
+        except Exception as e:
+            # Not marked processed: the DB claim was released, so a later notification can retry it.
+            logger.error(f"[GMAIL EVENT ERROR] Failed handling message {msg_data.get('id')}: {e}", exc_info=True)
+            continue
+        mark_gmail_message_processed(msg_data.get("id", ""))
+
+
+def _collect_allowed_senders(db: Session) -> set[str]:
+    """Test inboxes plus every buyer contact of an open campaign's commodity."""
+    allowed = {inbox.strip().lower() for inbox in (settings.my_test_email, settings.my_test_supplier_email) if inbox}
+    open_campaigns = db.query(CampaignModel).filter(~CampaignModel.deal_status.in_(CLOSED_DEAL_STATUSES)).all()
+    for campaign in open_campaigns:
+        allowed.update(
+            b.contact_email.strip().lower() for b in get_buyers_for_commodity(campaign.commodity) if b.contact_email
+        )
+    return allowed
+
+
+def _reply_to_inbound_email(reply: EmailReply) -> InboundEmail:
+    return InboundEmail(
+        body=str(reply).strip(),
+        sender=reply.sender,
+        subject=reply.subject,
+        message_id=reply.message_id,
+        in_reply_to=reply.in_reply_to,
+        references=reply.references,
+    )
+
+
+async def _poll_once(desk_emails: set[str]) -> None:
+    with app.db.database.SessionLocal() as db:
+        allowed_senders = _collect_allowed_senders(db)
+
+    reply = await asyncio.to_thread(check_latest_reply, allowed_senders=allowed_senders or None)
+    if not reply:
+        return
+    inbound = _reply_to_inbound_email(reply)
+    logger.info(
+        f"[EMAIL WORKER] Inbound email detected from '{inbound.sender}' | Subject: '{inbound.subject}' | "
+        f"Message-ID: '{inbound.message_id}'"
+    )
+    with app.db.database.SessionLocal() as db:
+        db_camp = find_open_campaign(inbound.subject, inbound.body, inbound.sender, db)
+        if db_camp:
+            await asyncio.to_thread(
+                process_inbound_message_transaction, db_camp, inbound, desk_emails, db, False
+            )
+
+
+async def email_polling_worker():
+    poll_interval = settings.email_poll_interval_seconds
+    logger.info(f"[EMAIL WORKER] Initialized live email polling worker (interval: {poll_interval}s)")
+    await asyncio.to_thread(initialize_unseen_snapshot)
+    desk_emails = get_desk_email_addresses()
+
+    while True:
+        try:
+            await _poll_once(desk_emails)
+        except asyncio.CancelledError:
+            logger.info("[EMAIL WORKER] Email polling worker cancelled.")
+            break
+        except Exception as e:
+            logger.error(f"[EMAIL WORKER ERROR] Unexpected error in polling cycle: {e}", exc_info=True)
+        await asyncio.sleep(poll_interval)

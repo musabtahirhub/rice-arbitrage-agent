@@ -3,37 +3,11 @@
 Landed = Supplier FOB + Freight + Buffer.  Net Margin % = (Buyer CIF - Landed) / Landed x 100.
 FOB ceiling = benchmark x (1 + max_variance%).  CIF floor = landed cost at the ceiling x (1 + target_margin%).
 """
-from typing import Literal, Optional
-
-from pydantic import BaseModel
+from typing import Optional
 
 from app.config import settings
 from app.models import Campaign, ParsedEmail
-
-DealAction = Literal["REJECT_HARD", "COUNTER_TO_MAXIMIZE", "ACCEPT_AND_CLOSE"]
-
-
-class DynamicBounds(BaseModel):
-    """Result of ``calculate_dynamic_bounds``."""
-
-    dynamic_fob_ceiling: float
-    landed_cost_at_ceiling: float
-    dynamic_cif_floor: float
-
-
-class DealEvaluation(BaseModel):
-    """Result of ``evaluate_deal`` / ``evaluate_deal_strategy``."""
-
-    viable: bool
-    action: Optional[DealAction] = None
-    net_spread: float = 0.0
-    net_margin_pct: float = 0.0
-    landed_cost: float = 0.0
-    reason: str = ""
-    # Dynamic bounds, merged in by evaluate_deal
-    dynamic_fob_ceiling: Optional[float] = None
-    landed_cost_at_ceiling: Optional[float] = None
-    dynamic_cif_floor: Optional[float] = None
+from app.schemas import DynamicBounds
 
 
 def resolve_buffer_usd(campaign: Campaign) -> float:

@@ -12,23 +12,18 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-import app.agents.workflow
-import app.db
-from app.agents.nodes.counter_buyer import counter_buyer_node
-from app.agents.nodes.intake import _process_parsed_buyer_terms
-from app.agents.nodes.risk import route_after_evaluation
-from app.api.approvals import approve_campaign_deal
-from app.api.negotiation import negotiate_turn
-from app.api.schemas import ApprovalPayload, SimulateTurnRequest
+import app.db.database
+import app.graph.workflow
 from app.config import settings
-from app.db import Base, CampaignModel, ProcessedInboundEmailModel, TradeAuditModel
-from app.models import Campaign, ParsedEmail
-from app.services import inbound_push
-from app.services.deal_evaluation import evaluate_deal
-from app.services.inbound_dedupe import process_inbound_message_transaction
-from app.services.inbound_polling import collect_allowed_senders
-from app.services.inbound_state import InboundEmail, classify_sender_role
-from app.services.regex_terms import extract_terms_with_regex
+from app.db.db_models import Base, CampaignModel, ProcessedInboundEmailModel, TradeAuditModel
+from app.graph.agents.buyer_agent import counter_buyer_node
+from app.graph.agents.risk_worker import _process_parsed_buyer_terms, route_after_evaluation
+from app.models import ApprovalPayload, Campaign, ParsedEmail, SimulateTurnRequest
+from app.pricing.evaluation import evaluate_deal
+from app.routes.negotiation import approve_campaign_deal, negotiate_turn
+from app.services.llm_service import extract_terms_with_regex
+from app.services.mail import gmail_worker, inbound_state, inbound_turn
+from app.services.mail.inbound_state import InboundEmail
 
 BENCH_FOB = 900.0
 FREIGHT = 45.0
@@ -49,12 +44,12 @@ def _terms(role: str, price: float, qty: float = 500.0) -> ParsedEmail:
 def _offline_patches(stack: ExitStack) -> None:
     """Patch every network-touching dependency used by graph nodes."""
     stack.enter_context(patch.object(settings, "gemini_api_key", ""))
-    stack.enter_context(patch("app.services.llm.get_chat_model", return_value=None))
-    for target in ("app.agents.nodes.risk", "app.agents.nodes.outreach", "app.services.inbound_turn"):
+    stack.enter_context(patch("app.services.llm_service.get_chat_model", return_value=None))
+    for target in ("app.graph.agents.risk_worker", "app.graph.agents.buyer_agent", "app.services.mail.inbound_turn"):
         stack.enter_context(patch(f"{target}.get_benchmark_rate", return_value=BENCH_FOB))
-    for target in ("app.agents.nodes.risk", "app.agents.nodes.outreach", "app.agents.nodes.intake"):
+    for target in ("app.graph.agents.risk_worker", "app.graph.agents.buyer_agent"):
         stack.enter_context(patch(f"{target}.estimate_freight", return_value=FREIGHT))
-    stack.enter_context(patch("app.agents.nodes.outreach.send_email", return_value=True))
+    stack.enter_context(patch("app.graph.agents.buyer_agent.send_email", return_value=True))
 
 
 class TestRegexFallbackParser(unittest.TestCase):
@@ -183,7 +178,7 @@ def _mock_graph(awaiting: bool, invoke_result: dict | None = None) -> MagicMock:
 class TestApprovalRoute(_DbTestCase):
     def test_approve_without_pending_interrupt_returns_409(self):
         graph = _mock_graph(awaiting=False)
-        with patch("app.agents.workflow.get_trade_graph", return_value=graph):
+        with patch("app.graph.workflow.get_trade_graph", return_value=graph):
             with self.assertRaises(HTTPException) as ctx:
                 approve_campaign_deal("CAMP-REG", ApprovalPayload(approved=True), db=self.db)
         self.assertEqual(ctx.exception.status_code, 409)
@@ -195,9 +190,9 @@ class TestApprovalRoute(_DbTestCase):
             "buyer_draft": "Subject: Acceptance\n\nConfirmed", "supplier_draft": "Subject: Lock\n\nLocked",
             "audit_transcript": [],
         })
-        with patch("app.agents.workflow.get_trade_graph", return_value=graph), \
-             patch("app.api.approvals._dispatch_supplier_approval_email", return_value=False) as supp, \
-             patch("app.api.approvals._dispatch_buyer_approval_email", return_value=True) as buyer:
+        with patch("app.graph.workflow.get_trade_graph", return_value=graph), \
+             patch("app.routes.negotiation._dispatch_supplier_approval_email", return_value=False) as supp, \
+             patch("app.routes.negotiation._dispatch_buyer_approval_email", return_value=True) as buyer:
             res = approve_campaign_deal("CAMP-REG", ApprovalPayload(approved=True), db=self.db)
         supp.assert_called_once()
         buyer.assert_not_called()
@@ -209,10 +204,10 @@ class TestApprovalRoute(_DbTestCase):
         graph = _mock_graph(awaiting=True, invoke_result={
             "deal_status": "closed", "buyer_draft": "b", "supplier_draft": "s", "audit_transcript": [],
         })
-        with patch("app.agents.workflow.get_trade_graph", return_value=graph), \
-             patch("app.api.approvals._dispatch_supplier_approval_email",
+        with patch("app.graph.workflow.get_trade_graph", return_value=graph), \
+             patch("app.routes.negotiation._dispatch_supplier_approval_email",
                    side_effect=lambda *a: calls.append("supplier") or True), \
-             patch("app.api.approvals._dispatch_buyer_approval_email",
+             patch("app.routes.negotiation._dispatch_buyer_approval_email",
                    side_effect=lambda *a: calls.append("buyer") or True):
             approve_campaign_deal("CAMP-REG", ApprovalPayload(approved=True), db=self.db)
         self.assertEqual(calls, ["supplier", "buyer"])
@@ -220,7 +215,7 @@ class TestApprovalRoute(_DbTestCase):
     def test_negotiate_turn_blocked_while_awaiting_approval(self):
         graph = _mock_graph(awaiting=True)
         req = SimulateTurnRequest(campaign_id="CAMP-REG", sender_role="buyer", raw_email="We bid USD 1,000/MT CIF")
-        with patch("app.agents.workflow.get_trade_graph", return_value=graph):
+        with patch("app.graph.workflow.get_trade_graph", return_value=graph):
             with self.assertRaises(HTTPException) as ctx:
                 negotiate_turn(req, db=self.db)
         self.assertEqual(ctx.exception.status_code, 409)
@@ -230,18 +225,18 @@ class TestApprovalRoute(_DbTestCase):
 class TestGmailWorkerInbound(_DbTestCase):
     def setUp(self):
         super().setUp()
-        self._orig_graph = app.agents.workflow.trade_graph
-        app.agents.workflow.trade_graph = app.agents.workflow.build_trade_graph(checkpointer=MemorySaver())
+        self._orig_graph = app.graph.workflow.trade_graph
+        app.graph.workflow.trade_graph = app.graph.workflow.build_trade_graph(checkpointer=MemorySaver())
 
     def tearDown(self):
-        app.agents.workflow.trade_graph = self._orig_graph
+        app.graph.workflow.trade_graph = self._orig_graph
         super().tearDown()
 
     def _config(self) -> dict:
         return {"configurable": {"thread_id": "CAMP-REG"}}
 
     def _launch_campaign(self, stack: ExitStack) -> None:
-        app.agents.workflow.get_trade_graph().invoke({
+        app.graph.workflow.get_trade_graph().invoke({
             "campaign": _campaign(), "negotiation_round": 0, "deal_status": "initiating", "pipeline_step": 0,
             "latest_email": "", "active_role": "buyer", "audit_transcript": [], "skip_email_dispatch": True,
         }, config=self._config())
@@ -252,26 +247,26 @@ class TestGmailWorkerInbound(_DbTestCase):
 
         inbound = InboundEmail(body=body, sender=sender, subject="Re: SCO",
                                message_id=msg_id or f"<{uuid.uuid4().hex}@test>", thread_id=thread_id)
-        process_inbound_message_transaction(
+        inbound_turn.process_inbound_message_transaction(
             self.db_camp, inbound, {"desk@arbitrage.com"}, self.db, use_gmail_api=use_gmail_api
         )
 
     def test_supplier_sender_classified_as_supplier(self):
-        role = classify_sender_role("Indus Rice <export@indusrice.pk>", {}, "Basmati 1121")
+        role = inbound_state.classify_sender_role("Indus Rice <export@indusrice.pk>", {}, "Basmati 1121")
         self.assertEqual(role, "supplier")
-        self.assertEqual(classify_sender_role("buyer@dubai.com", {}, "Basmati 1121"), "buyer")
+        self.assertEqual(inbound_state.classify_sender_role("buyer@dubai.com", {}, "Basmati 1121"), "buyer")
 
     def test_first_buyer_email_does_not_fabricate_supplier(self):
         with ExitStack() as stack:
             _offline_patches(stack)
             stack.enter_context(patch.object(settings, "my_test_supplier_email", ""))
-            transport = stack.enter_context(patch("app.services.inbound_replies.send_reply"))
+            transport = stack.enter_context(patch("app.services.mail.inbound_turn.send_reply"))
             self._launch_campaign(stack)
             self._process("Buyer <buyer@dubai.com>", "We bid USD 1,000/MT CIF Jebel Ali for 500 MT.")
 
-        state = app.agents.workflow.get_trade_graph().get_state(self._config()).values
+        state = app.graph.workflow.get_trade_graph().get_state(self._config()).values
         self.assertIsNone(state.get("supplier_terms"))
-        self.assertFalse(app.agents.workflow.is_awaiting_approval(self._config()))
+        self.assertFalse(app.graph.workflow.is_awaiting_approval(self._config()))
         self.assertEqual(state.get("gmail_thread_id"), "gmail-thread-1")  # declared key survives checkpointing
         recipients = [c.args[0] for c in transport.call_args_list]
         self.assertIn("export@indusrice.pk", recipients)  # RFQ sent to the real supplier
@@ -279,13 +274,13 @@ class TestGmailWorkerInbound(_DbTestCase):
     def test_supplier_reply_parsed_as_supplier_terms(self):
         with ExitStack() as stack:
             _offline_patches(stack)
-            stack.enter_context(patch("app.services.inbound_replies.send_reply"))
+            stack.enter_context(patch("app.services.mail.inbound_turn.send_reply"))
             self._launch_campaign(stack)
             self._process("Buyer <buyer@dubai.com>", "We bid USD 1,000/MT CIF Jebel Ali for 500 MT.")
             self._process("Indus Rice <export@indusrice.pk>", "We quote USD 880/MT FOB Karachi for 500 MT.",
                           thread_id="gmail-thread-supplier")
 
-        state = app.agents.workflow.get_trade_graph().get_state(self._config()).values
+        state = app.graph.workflow.get_trade_graph().get_state(self._config()).values
         self.assertIsNotNone(state.get("supplier_terms"))
         self.assertEqual(state["supplier_terms"].price_usd_per_mt, 880.0)
         self.assertEqual(state["buyer_terms"].price_usd_per_mt, 1000.0)
@@ -293,7 +288,7 @@ class TestGmailWorkerInbound(_DbTestCase):
 
     def test_inbound_while_awaiting_approval_skips_graph(self):
         graph = _mock_graph(awaiting=True)
-        with patch("app.agents.workflow.get_trade_graph", return_value=graph):
+        with patch("app.graph.workflow.get_trade_graph", return_value=graph):
             self._process("Buyer <buyer@dubai.com>", "Any update? We bid USD 1,000/MT CIF.")
         graph.invoke.assert_not_called()
         audits = self.db.query(TradeAuditModel).filter(TradeAuditModel.campaign_id == "CAMP-REG").all()
@@ -305,7 +300,7 @@ class TestGmailWorkerInbound(_DbTestCase):
         with ExitStack() as stack:
             _offline_patches(stack)
             stack.enter_context(patch.object(settings, "my_test_supplier_email", supplier_inbox))
-            transport = stack.enter_context(patch("app.services.inbound_replies.send_reply"))
+            transport = stack.enter_context(patch("app.services.mail.inbound_turn.send_reply"))
             self._launch_campaign(stack)
             self._process("Buyer <buyer@dubai.com>", "We bid USD 1,000/MT CIF Jebel Ali for 500 MT.")
             recipients = [c.args[0] for c in transport.call_args_list]
@@ -315,7 +310,7 @@ class TestGmailWorkerInbound(_DbTestCase):
             self._process(f"Test Supplier <{supplier_inbox}>", "We quote USD 880/MT FOB Karachi for 500 MT.",
                           thread_id="gmail-thread-supplier")
 
-        state = app.agents.workflow.get_trade_graph().get_state(self._config()).values
+        state = app.graph.workflow.get_trade_graph().get_state(self._config()).values
         self.assertEqual(state["supplier_terms"].price_usd_per_mt, 880.0)
         self.assertEqual(state["buyer_terms"].price_usd_per_mt, 1000.0)
 
@@ -324,7 +319,7 @@ class TestSupplierTestInbox(_DbTestCase):
     INBOX = "desk-tester+supplier@example.org"
 
     def test_resolver_prefers_test_inbox_over_state_and_directory(self):
-        from app.services.directory import resolve_supplier_contact
+        from app.directory import resolve_supplier_contact
 
         with patch.object(settings, "my_test_supplier_email", self.INBOX):
             self.assertEqual(resolve_supplier_contact("Basmati 1121", "old@indusrice.pk")[1], self.INBOX)
@@ -334,29 +329,29 @@ class TestSupplierTestInbox(_DbTestCase):
 
     def test_classifier_and_polling_allowlist_include_test_inbox(self):
         with patch.object(settings, "my_test_supplier_email", self.INBOX):
-            self.assertEqual(classify_sender_role(f"S <{self.INBOX}>", {}, "Basmati 1121"), "supplier")
-            self.assertIn(self.INBOX, collect_allowed_senders(self.db))
+            self.assertEqual(inbound_state.classify_sender_role(f"S <{self.INBOX}>", {}, "Basmati 1121"), "supplier")
+            self.assertIn(self.INBOX, gmail_worker._collect_allowed_senders(self.db))
 
     def test_test_inbox_is_not_treated_as_simulated(self):
-        from app.utils.email_filters import is_simulated_email
+        from app.services.mail.email_utils import is_simulated_email
 
         with patch.object(settings, "my_test_supplier_email", self.INBOX):
             self.assertFalse(is_simulated_email(self.INBOX))
 
     def test_volume_lock_goes_to_supplier_inbox_not_buyer_inbox(self):
-        from app.api.approvals import _dispatch_supplier_approval_email
+        from app.routes.negotiation import _dispatch_supplier_approval_email
 
         state = {"supplier_draft": "Subject: Lock\n\nLocked", "deal_status": "closed", "campaign": _campaign()}
         with patch.object(settings, "my_test_email", "desk-tester+buyer@example.org"), \
              patch.object(settings, "my_test_supplier_email", self.INBOX), \
-             patch("app.api.approvals._send_via_configured_transport", return_value=True) as send:
+             patch("app.routes.negotiation._send_via_configured_transport", return_value=True) as send:
             self.assertTrue(_dispatch_supplier_approval_email(state, self.db_camp))
         self.assertEqual(send.call_args.args[0], self.INBOX)
 
 
 class TestHeadlessGmailAuth(unittest.TestCase):
     def setUp(self):
-        import app.services.gmail_auth as gc
+        import app.services.mail.gmail_client as gc
 
         self.gc = gc
         self._cached = gc._cached_credentials
@@ -415,15 +410,17 @@ class TestHeadlessGmailAuth(unittest.TestCase):
 
 class TestLoggingAndPricingAndHistory(_DbTestCase):
     def test_email_and_gmail_loggers_reach_app_log(self):
-        import app.services.gmail_inbox
-        import app.services.imap
-        import app.services.market
+        import app.pricing.market
+        import app.services.mail.gmail_client
+        import app.services.mail.imap
+        import app.services.mail.smtp
 
-        for module in (app.services.imap, app.services.gmail_inbox, app.services.market):
+        modules = (app.services.mail.imap, app.services.mail.smtp, app.services.mail.gmail_client, app.pricing.market)
+        for module in modules:
             self.assertTrue(module.logger.name.startswith("arbitrage_desk."), module.logger.name)
 
     def test_opening_anchor_never_below_cif_floor(self):
-        from app.agents.nodes.outreach import _calculate_pricing_parameters
+        from app.graph.agents.buyer_agent import _calculate_pricing_parameters
 
         campaign = _campaign()
         for benchmark in (900.0, 999.0, 1200.0):
@@ -432,7 +429,7 @@ class TestLoggingAndPricingAndHistory(_DbTestCase):
             self.assertGreaterEqual(anchor, bounds.dynamic_cif_floor, f"benchmark {benchmark}")
 
     def test_status_history_includes_database_turns(self):
-        from app.services.audit import load_campaign_transcript
+        from app.routes.campaigns import _load_or_reconstruct_transcript
 
         for direction, role, msg in [("OUTBOUND", "agent", "Subject: Offer\n\nSCO"),
                                      ("INBOUND", "buyer", "We bid USD 1,200/MT CIF"),
@@ -442,7 +439,7 @@ class TestLoggingAndPricingAndHistory(_DbTestCase):
                                         raw_message=msg, direction=direction))
         self.db.commit()
         state = {"audit_transcript": [{"turn": 0, "action": "OUTBOUND_SCO", "message": "SCO"}]}
-        history = load_campaign_transcript(state, "CAMP-REG", self.db)
+        history = _load_or_reconstruct_transcript(state, "CAMP-REG", self.db)
         self.assertEqual(len(history), 4)
         self.assertEqual([h["role"] for h in history], ["agent", "buyer", "supplier", "agent"])
         self.assertEqual(history[3]["subject"], "TRADE CONFIRMATION")
@@ -452,7 +449,7 @@ class TestCheckpointSerde(unittest.TestCase):
     def test_domain_models_round_trip_through_allow_listed_serde(self):
         from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 
-        from app.agents.graph import build_checkpoint_serde
+        from app.graph.graph import build_checkpoint_serde
 
         # Control: future strict LangGraph behaviour turns unregistered models into plain dicts.
         strict = JsonPlusSerializer(allowed_msgpack_modules=None)
@@ -474,7 +471,7 @@ class TestExactlyOnceInbound(TestGmailWorkerInbound):
         with ExitStack() as stack:
             _offline_patches(stack)
             stack.enter_context(patch.object(settings, "my_test_supplier_email", ""))
-            transport = stack.enter_context(patch("app.services.inbound_replies.send_reply"))
+            transport = stack.enter_context(patch("app.services.mail.inbound_turn.send_reply"))
             self._launch_campaign(stack)
             body = "We bid USD 1,000/MT CIF Jebel Ali for 500 MT."
             self._process("Buyer <buyer@dubai.com>", body, msg_id="<dup-1@dubai.com>", use_gmail_api=True)
@@ -484,13 +481,13 @@ class TestExactlyOnceInbound(TestGmailWorkerInbound):
 
         self.assertGreater(sends_after_first, 0)
         self.assertEqual(transport.call_count, sends_after_first)  # no second set of replies
-        state = app.agents.workflow.get_trade_graph().get_state(self._config()).values
+        state = app.graph.workflow.get_trade_graph().get_state(self._config()).values
         self.assertEqual(state["negotiation_round"], 1)  # graph ran once
         row = self.db.query(ProcessedInboundEmailModel).one()
         self.assertEqual((row.message_key, row.source, row.status), ("dup-1@dubai.com", "push", "done"))
 
     def test_second_worker_cannot_claim_same_email(self):
-        from app.services.inbound_dedupe import claim_message
+        from app.services.mail.inbound_dedupe import claim_message
 
         other_worker_db = self.SessionLocal()
         try:
@@ -501,18 +498,18 @@ class TestExactlyOnceInbound(TestGmailWorkerInbound):
             other_worker_db.close()
 
     def test_failed_processing_releases_claim_for_retry(self):
-        with patch("app.services.inbound_dedupe.run_inbound_turn", side_effect=RuntimeError("boom")):
+        with patch("app.services.mail.inbound_turn._run_inbound_message_transaction", side_effect=RuntimeError("boom")):
             with self.assertRaises(RuntimeError):
                 self._process("Buyer <buyer@dubai.com>", "bid", msg_id="<retry-1@x>")
         self.assertEqual(self.db.query(ProcessedInboundEmailModel).count(), 0)
-        with patch("app.services.inbound_dedupe.run_inbound_turn") as run:
+        with patch("app.services.mail.inbound_turn._run_inbound_message_transaction") as run:
             self._process("Buyer <buyer@dubai.com>", "bid", msg_id="<retry-1@x>")
         run.assert_called_once()
 
     def test_email_without_message_id_is_keyed_by_content(self):
-        with patch("app.services.inbound_dedupe.run_inbound_turn") as run:
+        with patch("app.services.mail.inbound_turn._run_inbound_message_transaction") as run:
             for _ in range(2):
-                process_inbound_message_transaction(
+                inbound_turn.process_inbound_message_transaction(
                     self.db_camp, InboundEmail(body="same body", sender="b@x.com", subject="Re: SCO"), set(), self.db,
                     use_gmail_api=False,
                 )
@@ -521,32 +518,32 @@ class TestExactlyOnceInbound(TestGmailWorkerInbound):
 
 class TestPushIngestion(unittest.TestCase):
     def setUp(self):
-        self._cursor = inbound_push.LAST_SEEN_HISTORY_ID
+        self._cursor = gmail_worker.LAST_SEEN_HISTORY_ID
 
     def tearDown(self):
-        inbound_push.LAST_SEEN_HISTORY_ID = self._cursor
+        gmail_worker.LAST_SEEN_HISTORY_ID = self._cursor
 
     def _run(self, history_id: str):
         import asyncio
 
-        asyncio.run(inbound_push.process_incoming_gmail_event(history_id))
+        asyncio.run(gmail_worker.process_incoming_gmail_event(history_id))
 
     def test_stale_notification_skipped_and_cursor_never_moves_back(self):
-        inbound_push.LAST_SEEN_HISTORY_ID = "2271236"
-        with patch("app.services.inbound_push.fetch_latest_messages_by_history", return_value=[]) as fetch:
+        gmail_worker.LAST_SEEN_HISTORY_ID = "2271236"
+        with patch("app.services.mail.gmail_worker.fetch_latest_messages_by_history", return_value=[]) as fetch:
             self._run("2271028")  # older backlog notification
             fetch.assert_not_called()
-            self.assertEqual(inbound_push.LAST_SEEN_HISTORY_ID, "2271236")
+            self.assertEqual(gmail_worker.LAST_SEEN_HISTORY_ID, "2271236")
             self._run("2271300")
             fetch.assert_called_once_with("2271236")
-            self.assertEqual(inbound_push.LAST_SEEN_HISTORY_ID, "2271300")
+            self.assertEqual(gmail_worker.LAST_SEEN_HISTORY_ID, "2271300")
 
     def test_message_marked_processed_only_after_success(self):
-        inbound_push.LAST_SEEN_HISTORY_ID = "100"
-        with patch("app.services.inbound_push.fetch_latest_messages_by_history", return_value=[{"id": "g-ok"}, {"id": "g-bad"}]), \
-             patch("app.services.inbound_push.handle_push_message",
+        gmail_worker.LAST_SEEN_HISTORY_ID = "100"
+        with patch("app.services.mail.gmail_worker.fetch_latest_messages_by_history", return_value=[{"id": "g-ok"}, {"id": "g-bad"}]), \
+             patch("app.services.mail.gmail_worker._handle_single_push_message",
                    side_effect=lambda m, d: (_ for _ in ()).throw(RuntimeError("x")) if m["id"] == "g-bad" else None), \
-             patch("app.services.inbound_push.mark_gmail_message_processed") as mark:
+             patch("app.services.mail.gmail_worker.mark_gmail_message_processed") as mark:
             self._run("101")
         mark.assert_called_once_with("g-ok")
 
@@ -560,7 +557,7 @@ class TestPushIngestion(unittest.TestCase):
 
         payload = {"message": {"data": base64.b64encode(json.dumps({"historyId": 555}).encode()).decode()}}
         with patch.object(settings, "use_push_webhooks", False), \
-             patch("app.api.webhooks.process_incoming_gmail_event") as process:
+             patch("app.routes.webhooks.process_incoming_gmail_event") as process:
             res = TestClient(app.main.app).post("/api/webhooks/gmail", json=payload)
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.json()["status"], "ignored")

@@ -1,285 +1,201 @@
-let currentCampaignId = null;
-let simStage = 0; // 0: uninitialized, 1: SCO sent, 2: Buyer Bid, 3: Supplier Quote, 4: Closed
-let hardFloor = 50.0;
-let softTarget = 120.0;
-let maxRounds = 3;
+/* Dashboard controller: state, polling, routing and API calls. Rendering lives in components.js (window.UI). */
+(function () {
+  const POLL_MS = 5000;
+  const STORE_KEY = "arb_desk_campaigns";
+  const $ = (id) => document.getElementById(id);
 
-const PRESETS = {
-  buyer_low: {
-    role: "buyer",
-    email: "Subject: Firm Offer - Basmati 1121\\n\\nDear Desk,\\n\\nWe review your SCO and can only offer USD 995.00/MT CIF Jebel Ali for 500 MT. This yields less than minimum floor.\\n\\nRegards,\\nProcurement Manager\\nGulf Food Trading LLC"
-  },
-  buyer_concession_r1: {
-    role: "buyer",
-    email: "Subject: Revised Target CIF - Basmati 1121\\n\\nDear Desk,\\n\\nWe are interested in the 500 MT Basmati parcel. Our target CIF price is USD 1045.00/MT CIF Jebel Ali. Payment 100% LC at sight.\\n\\nWarm regards,\\nProcurement Manager\\nGulf Food Trading LLC"
-  },
-  supplier_quote: {
-    role: "supplier",
-    email: "Subject: Quotation - Basmati 1121 Sella\\n\\nDear Desk,\\n\\nIn response to your RFQ, we confirm volume allocation of 500 MT Basmati 1121 at USD 900.00/MT FOB Karachi. Ready for prompt shipment against LC.\\n\\nBest regards,\\nIndus Rice Mills"
-  },
-  buyer_viable: {
-    role: "buyer",
-    email: "Subject: Accepted Terms - Basmati 1121\\n\\nDear Desk,\\n\\nWe accept your revised terms and agree to increase our purchase bid for 500 MT Basmati 1121 to USD 1150.00/MT CIF Jebel Ali. Please confirm volume lock and send PI.\\n\\nWarm regards,\\nGulf Food Trading LLC"
-  }
-};
-
-function loadPreset(key) {
-  const p = PRESETS[key];
-  if (!p) return;
-  document.querySelector(`input[name="senderRole"][value="${p.role}"]`).checked = true;
-  document.getElementById("emailInput").value = p.email.replace(/\\n/g, '\n');
-}
-
-function updatePipelineUI(step, action = null) {
-  for (let i = 1; i <= 4; i++) {
-    const el = document.getElementById(`pipeStep${i}`);
-    const icon = document.getElementById(`pipeStep${i}Icon`);
-    if (i < step) {
-      el.className = "p-3.5 rounded-xl border border-emerald-700/60 bg-emerald-950/30 transition-all duration-300 relative";
-      icon.className = "w-6 h-6 rounded-full bg-emerald-50 text-slate-950 text-xs font-bold flex items-center justify-center";
-      icon.innerHTML = "✓";
-    } else if (i === step) {
-      el.className = "p-3.5 rounded-xl border border-blue-500 bg-slate-900 shadow-lg shadow-blue-500/10 transition-all duration-300 relative ring-1 ring-blue-500";
-      icon.className = "w-6 h-6 rounded-full bg-blue-500 text-white text-xs font-bold flex items-center justify-center animate-pulse";
-      icon.innerHTML = i;
-    } else {
-      el.className = "p-3.5 rounded-xl border border-slate-800 bg-slate-950/60 transition-all duration-300 relative opacity-50";
-      icon.className = "w-6 h-6 rounded-full bg-slate-800 text-slate-400 text-xs font-bold flex items-center justify-center";
-      icon.innerHTML = i;
-    }
-  }
-
-  const actionBadge = document.getElementById("activeActionBadge");
-  const stratAction = document.getElementById("strategicAction");
-  if (action === "REJECT_HARD") {
-    actionBadge.textContent = "Action: REJECT_HARD";
-    actionBadge.className = "px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-rose-950 text-rose-300 border border-rose-800";
-    stratAction.textContent = "REJECT_HARD";
-    stratAction.className = "text-xs font-extrabold text-rose-400 mt-1 block tracking-tight";
-  } else if (action === "COUNTER_TO_MAXIMIZE") {
-    actionBadge.textContent = "Action: COUNTER_TO_MAXIMIZE";
-    actionBadge.className = "px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-amber-950 text-amber-300 border border-amber-800";
-    stratAction.textContent = "COUNTER";
-    stratAction.className = "text-xs font-extrabold text-amber-400 mt-1 block tracking-tight";
-  } else if (action === "ACCEPT_AND_CLOSE") {
-    actionBadge.textContent = "Action: ACCEPT_AND_CLOSE";
-    actionBadge.className = "px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-950 text-emerald-300 border border-emerald-800 animate-pulse";
-    stratAction.textContent = "CLOSED 🎉";
-    stratAction.className = "text-xs font-extrabold text-emerald-400 mt-1 block tracking-tight";
-  }
-}
-
-function updateSpreadProgress(spread) {
-  document.getElementById("netSpread").textContent = `$${spread.toFixed(2)}/MT`;
-  document.getElementById("progressText").textContent = `$${Math.max(0, spread).toFixed(2)} / $${softTarget.toFixed(2)} MT`;
-  const pct = Math.min(100, Math.max(0, (spread / softTarget) * 100));
-  document.getElementById("progressBar").style.width = `${pct}%`;
-}
-
-// Launch Campaign (Proactive Origination & Autonomous Execution)
-async function launchCampaign(autoRun = false) {
-  hardFloor = parseFloat(document.getElementById("hardFloorInput").value);
-  softTarget = parseFloat(document.getElementById("softTargetInput").value);
-  maxRounds = parseInt(document.getElementById("maxRoundsInput").value);
-
-  const payload = {
-    commodity: document.getElementById("commoditySelect").value,
-    target_volume_mt: parseFloat(document.getElementById("volumeInput").value),
-    target_margin_pct: 10.0,
-    max_variance_from_benchmark_pct: 5.0,
-    destination_port: document.getElementById("portSelect").value,
-    min_profit_per_mt_hard: hardFloor,
-    min_profit_per_mt_soft: softTarget,
-    max_negotiation_rounds: maxRounds,
-    auto_run: autoRun,
+  const state = {
+    ids: [],              // campaign ids this browser knows about (the backend exposes no list route)
+    data: {},             // id -> latest GET /api/campaigns/{id} payload
+    selected: null,
+    feedFilter: "all",
+    threadFilter: "all",
+    listSupported: true,  // flips off if GET /api/campaigns is not served
+    lastRender: "",
   };
 
-  try {
-    const res = await fetch("/api/campaigns", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload)
-    });
-    const data = await res.json();
-    currentCampaignId = data.campaign_id;
-
-    // Render discovered counterparties
-    if (data.discovered_buyers) {
-      const buyersList = document.getElementById("buyersList");
-      buyersList.innerHTML = data.discovered_buyers.map(b => `
-        <div class="bg-slate-950 p-2 rounded-lg border border-slate-800 flex justify-between items-center">
-          <div>
-            <span class="font-medium text-white">${b.name}</span>
-            <div class="text-[10px] text-slate-400">${b.primary_port} • ${b.country}</div>
-          </div>
-          <span class="text-[10px] font-bold text-emerald-400">★ ${b.reputation_score}</span>
-        </div>
-      `).join("");
-    }
-
-    if (data.discovered_suppliers) {
-      const suppliersList = document.getElementById("suppliersList");
-      suppliersList.innerHTML = data.discovered_suppliers.map(s => `
-        <div class="bg-slate-950 p-2 rounded-lg border border-slate-800 flex justify-between items-center">
-          <div>
-            <span class="font-medium text-white">${s.name}</span>
-            <div class="text-[10px] text-slate-400">${s.primary_port} • ${s.country}</div>
-          </div>
-          <span class="text-[10px] font-bold text-blue-400">★ ${s.reputation_score}</span>
-        </div>
-      `).join("");
-    }
-    document.getElementById("counterpartiesCard").classList.remove("hidden");
-
-    if (data.dynamic_fob_ceiling) {
-      document.getElementById("fobCeiling").textContent = `$${data.dynamic_fob_ceiling.toFixed(2)}/MT`;
-    }
-    if (data.dynamic_cif_floor) {
-      document.getElementById("cifFloor").textContent = `$${data.dynamic_cif_floor.toFixed(2)}/MT`;
-    }
-
-    if (autoRun && data.deal_status === "closed") {
-      // Autonomous execution completed end-to-end
-      simStage = 4;
-      document.getElementById("simulationCard").classList.remove("opacity-40", "pointer-events-none");
-      document.getElementById("dealBadge").textContent = `Closed & Locked: ${data.campaign_id} 🎉`;
-      document.getElementById("dealBadge").className = "px-2.5 py-1 rounded-lg text-xs font-semibold bg-emerald-600 text-white animate-pulse";
-      document.getElementById("pipelineStatusLabel").textContent = `Step 4: Deal Closed Autonomously (Rounds: ${data.negotiation_rounds_completed})`;
-      document.getElementById("turnCounterBadge").textContent = `Rounds: ${data.negotiation_rounds_completed} / ${maxRounds}`;
-      document.getElementById("invariantText").textContent = data.evaluation_reason || "Autonomous negotiation concluded with optimal margin allocation.";
-
-      updateSpreadProgress(data.final_net_spread_usd || data.net_spread_usd || 0.0);
-      updatePipelineUI(4, data.action || "ACCEPT_AND_CLOSE");
-
-      if (data.buyer_draft) {
-        document.getElementById("buyerDraft").textContent = data.buyer_draft;
-        document.getElementById("buyerDraftType").textContent = "Deal Confirmation (SCO Acceptance)";
-      }
-      if (data.supplier_draft) {
-        document.getElementById("supplierDraft").textContent = data.supplier_draft;
-        document.getElementById("supplierDraftType").textContent = "Volume Allocation Locked";
-      }
-
-      document.getElementById("nextTurnBtnText").textContent = "Deal Fully Closed & Optimized 🎉";
-      document.getElementById("stepHint").textContent = `Autonomous execution completed (${data.audit_transcript?.length || 0} msgs in audit trail)`;
-    } else {
-      // Step-by-step interactive mode
-      simStage = 1;
-      document.getElementById("simulationCard").classList.remove("opacity-40", "pointer-events-none");
-      document.getElementById("dealBadge").textContent = `Active: ${data.campaign_id}`;
-      document.getElementById("dealBadge").className = "px-2.5 py-1 rounded-lg text-xs font-semibold bg-emerald-950 text-emerald-400 border border-emerald-800";
-      document.getElementById("pipelineStatusLabel").textContent = "Step 1: Proactive Buyer SCO Dispatched";
-
-      if (data.buyer_draft) {
-        document.getElementById("buyerDraft").textContent = data.buyer_draft;
-        document.getElementById("buyerDraftType").textContent = `Cold SCO (Anchor $${data.anchor_cif_usd?.toFixed(2) || '0.00'}/MT)`;
-      }
-
-      updatePipelineUI(1);
-      updateSpreadProgress(0.0);
-
-      document.getElementById("nextTurnBtnText").textContent = "Simulate Turn 1: Buyer Indicates Bid ($1045 CIF) ➔";
-      document.getElementById("stepHint").textContent = "Buyer responds to Cold SCO";
-    }
-  } catch (err) {
-    alert("Error creating campaign: " + err);
-  }
-}
-
-// Automated Stepper Function
-async function simulateNextTurn() {
-  if (!currentCampaignId) return alert("Please launch campaign first.");
-
-  let role = "buyer";
-  let email = "";
-
-  if (simStage === 1) {
-    // Step 1 -> Buyer sends initial bid ($1045 CIF, $80 spread over landed $965)
-    role = "buyer";
-    email = "Subject: Re: SCO Basmati 1121\n\nDear Trading Desk,\n\nWe review your SCO. We are prepared to book 500 MT Basmati 1121 at USD 1045.00/MT CIF Jebel Ali, LC at sight.\n\nRegards,\nProcurement Manager\nGulf Food Trading LLC";
-    document.getElementById("nextTurnBtnText").textContent = "Simulate Turn 2: Asian Mill Quotes ($900 FOB) ➔";
-    document.getElementById("stepHint").textContent = "Supplier responds to RFQ";
-    simStage = 2;
-  } else if (simStage === 2) {
-    // Step 2 -> Supplier quotes $900 FOB
-    role = "supplier";
-    email = "Subject: Quotation - 500 MT Basmati 1121\n\nDear Procurement Desk,\n\nWe quote 500 MT Basmati 1121 at USD 900.00/MT FOB Karachi. LC payment.\n\nBest regards,\nIndus Rice Mills";
-    document.getElementById("nextTurnBtnText").textContent = "Simulate Turn 3: Buyer Concedes to Margin Target ($1085 CIF) ➔";
-    document.getElementById("stepHint").textContent = "Buyer responds to Round 1 Counter";
-    simStage = 3;
-  } else if (simStage === 3) {
-    // Step 3 -> Buyer agrees to optimal close ($1085 CIF, $120 spread)
-    role = "buyer";
-    email = "Subject: Final Price Agreement - Basmati 1121\n\nDear Trading Desk,\n\nTo conclude this business, we agree to adjust our CIF price to USD 1085.00/MT CIF Jebel Ali for 500 MT. Please lock allocation and dispatch contract.\n\nWarm regards,\nGulf Food Trading LLC";
-    document.getElementById("nextTurnBtnText").textContent = "Deal Fully Closed & Optimized 🎉";
-    document.getElementById("stepHint").textContent = "Negotiation complete";
-    simStage = 4;
-  } else {
-    alert("Deal negotiation cycle complete! You can test manual scenarios or launch another campaign.");
-    return;
-  }
-
-  await executeNegotiationTurn(role, email);
-}
-
-async function executeNegotiationTurn(role, email) {
-  const payload = {
-    campaign_id: currentCampaignId,
-    sender_role: role,
-    raw_email: email
+  /* ---------- helpers ---------- */
+  const store = {
+    load() { try { return JSON.parse(localStorage.getItem(STORE_KEY)) || []; } catch { return []; } },
+    save() { try { localStorage.setItem(STORE_KEY, JSON.stringify(state.ids)); } catch { /* storage unavailable */ } },
   };
-
-  try {
-    const res = await fetch("/api/negotiate", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload)
-    });
-    const data = await res.json();
-
-    // Update Round & Deal status
-    document.getElementById("turnCounterBadge").textContent = `Round ${data.negotiation_round} / ${maxRounds}`;
-    document.getElementById("invariantText").textContent = data.evaluation_reason;
-
-    // Update Spread & Action
-    updateSpreadProgress(data.net_spread_usd || 0.0);
-    updatePipelineUI(data.pipeline_step || 2, data.action);
-
-    if (data.deal_status === "closed") {
-      document.getElementById("dealBadge").textContent = "Deal Closed & Viable! 🎉";
-      document.getElementById("dealBadge").className = "px-2.5 py-1 rounded-lg text-xs font-semibold bg-emerald-600 text-white animate-pulse";
-      document.getElementById("pipelineStatusLabel").textContent = "Step 4: Margin Optimized & Deal Closed";
-    } else if (data.deal_status === "rejected") {
-      document.getElementById("dealBadge").textContent = "Deal Rejected (Hard Floor)";
-      document.getElementById("dealBadge").className = "px-2.5 py-1 rounded-lg text-xs font-semibold bg-rose-900 text-rose-200 border border-rose-700";
-      document.getElementById("pipelineStatusLabel").textContent = "Deal Terminated (Hard Floor Breach)";
-    } else {
-      document.getElementById("dealBadge").textContent = `Round ${data.negotiation_round}: ${data.action || "Active"}`;
-      document.getElementById("dealBadge").className = "px-2.5 py-1 rounded-lg text-xs font-semibold bg-amber-900/80 text-amber-200 border border-amber-700";
-      document.getElementById("pipelineStatusLabel").textContent = `Step ${data.pipeline_step}: Active Bargaining Round ${data.negotiation_round}`;
-    }
-
-    // Update Correspondence Drafts
-    if (data.buyer_draft) {
-      document.getElementById("buyerDraft").textContent = data.buyer_draft;
-      document.getElementById("buyerDraftType").textContent = data.deal_status === "closed" ? "Deal Confirmation (SCO Lock)" : "Tactical Counter-Offer";
-    }
-    if (data.supplier_draft) {
-      document.getElementById("supplierDraft").textContent = data.supplier_draft;
-      document.getElementById("supplierDraftType").textContent = data.deal_status === "closed" ? "Allocation Locked" : (data.target_fob_ceiling ? `RFQ (Ceiling $${data.target_fob_ceiling.toFixed(2)}/MT)` : "Tactical Counter-Bid");
-    }
-
-  } catch (err) {
-    alert("Error executing negotiation turn: " + err);
+  function toast(msg, kind = "ok") {
+    const el = document.createElement("div");
+    el.className = "toast " + kind; el.textContent = msg;
+    $("toasts").appendChild(el); setTimeout(() => el.remove(), 4500);
   }
-}
+  async function api(path, opts) {
+    const res = await fetch(path, opts);
+    let body = null;
+    try { body = await res.json(); } catch { /* non-JSON body */ }
+    if (!res.ok) { const e = new Error(body?.detail || res.statusText || "Request failed"); e.status = res.status; throw e; }
+    return body;
+  }
+  const post = (path, payload) => api(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+  const icons = () => window.lucide && window.lucide.createIcons();
+  function remember(id) { if (id && !state.ids.includes(id)) { state.ids.unshift(id); store.save(); } }
 
-// Direct Form Submission
-document.getElementById("negotiateForm").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  if (!currentCampaignId) return alert("Please launch a campaign first.");
-  const role = document.querySelector('input[name="senderRole"]:checked').value;
-  const raw = document.getElementById("emailInput").value;
-  if (!raw.trim()) return alert("Please enter email text.");
-  await executeNegotiationTurn(role, raw);
-});
+  /* ---------- data loading ---------- */
+  async function discoverIds() {
+    if (!state.listSupported) return;
+    try {
+      const body = await api("/api/campaigns");
+      const rows = Array.isArray(body) ? body : body?.campaigns;
+      (rows || []).forEach((r) => remember(typeof r === "string" ? r : r.campaign_id || r.id));
+    } catch (e) {
+      if (e.status === 404 || e.status === 405) state.listSupported = false; // fall back to locally tracked ids
+    }
+  }
+  async function loadCampaign(id) {
+    try { state.data[id] = await api("/api/campaigns/" + encodeURIComponent(id)); }
+    catch (e) {
+      if (e.status === 404) { state.ids = state.ids.filter((x) => x !== id); delete state.data[id]; store.save(); }
+    }
+  }
+  async function checkHealth() {
+    const badge = $("healthBadge");
+    let ok = false;
+    try { await api("/api/health"); ok = true; }
+    catch (e) { if (e.status === 404 || e.status === 405) { try { await api("/api/directory"); ok = true; } catch { /* offline */ } } }
+    badge.className = "badge " + (ok ? "badge-green" : "badge-red");
+    badge.textContent = ok ? "Desk live" : "API offline";
+  }
+  async function refresh() {
+    await Promise.all([checkHealth(), discoverIds()]);
+    await Promise.all(state.ids.map(loadCampaign));
+    if (state.selected && !state.data[state.selected]) state.selected = null;
+    if (!state.selected && state.ids.length) state.selected = state.ids.find((i) => state.data[i]) || null;
+    $("lastSync").textContent = "synced " + new Date().toLocaleTimeString();
+    render();
+  }
+
+  /* ---------- rendering ---------- */
+  const campaigns = () => state.ids.map((i) => state.data[i]).filter(Boolean);
+  const isActive = (c) => !["closed", "rejected", "supplier_lock_failed"].includes(c.deal_status);
+
+  function renderKpis() {
+    const all = campaigns();
+    const closed = all.filter((c) => c.deal_status === "closed");
+    const vol = closed.reduce((s, c) => s + (c.buyer_terms?.quantity_mt || 0), 0);
+    const margins = all.filter((c) => c.buyer_terms || c.deal_status === "closed")
+      .map((c) => c.final_net_margin_pct ?? c.net_margin_pct).filter((m) => typeof m === "number");
+    const avg = margins.length ? margins.reduce((a, b) => a + b, 0) / margins.length : null;
+    const pending = all.filter((c) => c.deal_status === "pending_approval").length;
+    $("kpiActive").textContent = all.filter(isActive).length;
+    $("kpiVolume").textContent = vol.toLocaleString();
+    $("kpiMargin").textContent = avg === null ? "–" : avg.toFixed(2) + "%";
+    $("kpiMargin").className = "kpi-value " + (avg === null ? "" : avg > 0 ? "text-green-400" : "text-red-400");
+    $("kpiPending").textContent = pending;
+    $("kpiPending").className = "kpi-value " + (pending ? "text-amber-400" : "");
+  }
+  function renderFeed() {
+    let list = campaigns();
+    if (state.feedFilter === "pending") list = list.filter((c) => c.deal_status === "pending_approval");
+    if (state.feedFilter === "locked") list = list.filter((c) => c.deal_status === "closed");
+    $("campaignList").innerHTML = list.length ? list.map((c) => UI.campaignRow(c, c.campaign_id === state.selected)).join("") : UI.emptyFeed();
+    document.querySelectorAll("#feedFilters .tab").forEach((t) => t.classList.toggle("active", t.dataset.filter === state.feedFilter));
+  }
+  function renderInspector() {
+    const c = state.data[state.selected];
+    const box = $("inspector");
+    const sig = JSON.stringify([c, state.threadFilter]);
+    if (sig === state.lastRender) return; // nothing changed: keep scroll position and unsent drafts
+    state.lastRender = sig;
+    if (!c) { box.innerHTML = UI.emptyInspector(); return; }
+    const draft = $("emailInput")?.value || "";
+    const role = document.querySelector('input[name="senderRole"]:checked')?.value;
+    const open = box.querySelector("details")?.open;
+    const scroll = $("threadScroll");
+    const atBottom = !scroll || scroll.scrollTop + scroll.clientHeight >= scroll.scrollHeight - 30;
+    box.innerHTML = UI.inspector(c, state.threadFilter);
+    if ($("emailInput")) { $("emailInput").value = draft; if (draft) box.querySelector("details").open = true; }
+    if (open) box.querySelector("details").open = true;
+    if (role) { const r = document.querySelector(`input[name="senderRole"][value="${role}"]`); if (r) r.checked = true; }
+    const ns = $("threadScroll"); if (ns && atBottom) ns.scrollTop = ns.scrollHeight;
+  }
+  function render() { renderKpis(); renderFeed(); renderInspector(); icons(); }
+
+  function select(id) { state.selected = id; state.lastRender = ""; render(); }
+
+  /* ---------- modals ---------- */
+  const open = (id) => { $(id).classList.remove("hidden"); icons(); };
+  const close = (id) => $(id).classList.add("hidden");
+  document.querySelectorAll(".modal-backdrop").forEach((m) => {
+    m.addEventListener("click", (e) => { if (e.target === m || e.target.closest("[data-close]")) m.classList.add("hidden"); });
+  });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") document.querySelectorAll(".modal-backdrop").forEach((m) => m.classList.add("hidden")); });
+
+  /* ---------- actions ---------- */
+  async function launchCampaign(e) {
+    e.preventDefault();
+    const auto = $("fAuto").checked;
+    const payload = {
+      commodity: $("fCommodity").value,
+      target_volume_mt: parseFloat($("fVolume").value),
+      target_margin_pct: 10.0,
+      max_variance_from_benchmark_pct: 5.0,
+      destination_port: $("fPort").value,
+      min_profit_per_mt_hard: parseFloat($("fHard").value),
+      min_profit_per_mt_soft: parseFloat($("fSoft").value),
+      max_negotiation_rounds: parseInt($("fRounds").value, 10),
+      auto_run: auto,
+    };
+    const btn = $("launchBtn"); btn.disabled = true; btn.textContent = auto ? "Running…" : "Launching…";
+    try {
+      const data = await post("/api/campaigns", payload);
+      remember(data.campaign_id); close("campaignModal");
+      state.selected = data.campaign_id; state.lastRender = "";
+      toast("Campaign " + data.campaign_id + " launched");
+      await refresh();
+    } catch (err) { toast("Launch failed: " + err.message, "error"); }
+    finally { btn.disabled = false; btn.textContent = "Launch"; }
+  }
+
+  async function submitEmail(e) {
+    e.preventDefault();
+    const raw = $("emailInput").value.trim();
+    if (!raw) return toast("Enter email text first", "error");
+    const role = document.querySelector('input[name="senderRole"]:checked').value;
+    try {
+      await post("/api/negotiate", { campaign_id: state.selected, sender_role: role, raw_email: raw });
+      $("emailInput").value = "";
+      toast("Evaluation complete"); await refresh();
+    } catch (err) { toast(err.message, "error"); await refresh(); }
+  }
+
+  async function decide(approved) {
+    const c = state.data[state.selected]; if (!c) return;
+    const ov = parseFloat($("aOverride").value);
+    const payload = { approved, override_cif_price: isNaN(ov) ? null : ov, reviewer_notes: $("aNotes").value.trim() || null };
+    const btns = [$("approveBtn"), $("rejectBtn")]; btns.forEach((b) => (b.disabled = true));
+    try {
+      await post(`/api/campaigns/${encodeURIComponent(c.campaign_id)}/approve`, payload);
+      close("approvalModal"); toast(approved ? "Deal approved — supplier locked, buyer confirmed" : "Deal rejected");
+      state.lastRender = ""; await refresh();
+    } catch (err) { toast(err.message, "error"); await refresh(); }
+    finally { btns.forEach((b) => (b.disabled = false)); }
+  }
+
+  /* ---------- events ---------- */
+  document.addEventListener("click", (e) => {
+    const row = e.target.closest("[data-campaign]"); if (row) return select(row.dataset.campaign);
+    const f = e.target.closest("#feedFilters [data-filter]"); if (f) { state.feedFilter = f.dataset.filter; return renderFeed(); }
+    const t = e.target.closest("[data-thread]"); if (t) { state.threadFilter = t.dataset.thread; return render(); }
+    if (e.target.closest('[data-action="open-approval"]')) {
+      const c = state.data[state.selected]; if (!c) return;
+      $("approvalSummary").innerHTML = UI.approvalSummary(c); $("aOverride").value = ""; $("aNotes").value = ""; open("approvalModal");
+    }
+  });
+  document.addEventListener("submit", (e) => { if (e.target.id === "negotiateForm") submitEmail(e); });
+  $("campaignForm").addEventListener("submit", launchCampaign);
+  $("newCampaignBtn").addEventListener("click", () => open("campaignModal"));
+  $("refreshBtn").addEventListener("click", refresh);
+  $("approveBtn").addEventListener("click", () => decide(true));
+  $("rejectBtn").addEventListener("click", () => decide(false));
+
+  /* ---------- boot ---------- */
+  state.ids = store.load();
+  render();
+  refresh();
+  setInterval(() => { if (!document.hidden) refresh(); }, POLL_MS);
+})();

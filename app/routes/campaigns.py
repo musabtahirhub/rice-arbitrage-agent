@@ -5,22 +5,55 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
-from app.agents import workflow
-from app.agents.state import DealState
-from app.api.schemas import CampaignStatusResponse, CreateCampaignRequest, CreateCampaignResponse
 from app.config import STATIC_DIR, settings
-from app.db import CampaignModel, get_db
+from app.db.database import get_db
+from app.db.db_models import CampaignModel, TradeAuditModel, add_trade_audit, desk_party
+from app.directory import get_all_counterparties
+from app.graph import workflow
 from app.logger import get_logger
-from app.models import Campaign
-from app.services.audit import add_trade_audit, load_campaign_transcript
+from app.models import Campaign, CreateCampaignRequest, DealState
+from app.schemas import AuditTranscriptEntry, CampaignStatusResponse, CreateCampaignResponse, model_from_state
 from app.services.campaign_runner import run_full_autonomous_campaign
-from app.services.directory import get_all_counterparties
-from app.utils.state_mapping import model_from_state
-from app.utils.telemetry import build_trace_config, flush_telemetry, get_langfuse_handler
+from app.services.mail.email_utils import split_subject_and_body
+from app.telemetry import build_trace_config, flush_telemetry, get_langfuse_handler
 
 logger = get_logger("arbitrage_desk")
-
 router = APIRouter()
+
+
+def _audit_to_transcript_entry(turn: int, audit: TradeAuditModel) -> dict:
+    message = audit.raw_message or ""
+    subject = split_subject_and_body(message, default_subject="")[0] if message.lower().startswith("subject:") else ""
+    inbound = audit.direction == "INBOUND"
+    entry = AuditTranscriptEntry(
+        turn=turn,
+        sender=audit.role if inbound else desk_party(),
+        recipient=desk_party() if inbound else "counterparty",
+        role=audit.role,
+        action=audit.direction,
+        subject=subject,
+        message=message,
+    )
+    return entry.model_dump(exclude_none=True)
+
+
+def _load_or_reconstruct_transcript(state: dict, campaign_id: str, db: Session) -> list:
+    """The most complete history available.
+
+    Graph state only holds entries written by graph nodes (e.g. the opening SCO), while every API and
+    email turn is recorded in trade_audits. Use whichever source has more entries.
+    """
+    state_transcript = state.get("audit_transcript") or []
+    audits = (
+        db.query(TradeAuditModel)
+        .filter(TradeAuditModel.campaign_id == campaign_id)
+        .order_by(TradeAuditModel.id.asc())
+        .all()
+    )
+    if len(state_transcript) >= len(audits):
+        return state_transcript
+    return [_audit_to_transcript_entry(turn, audit) for turn, audit in enumerate(audits)]
+
 
 _CAMPAIGN_FIELDS = (
     "commodity", "target_volume_mt", "target_margin_pct", "max_variance_from_benchmark_pct", "destination_port",
@@ -166,7 +199,7 @@ def get_campaign_status(campaign_id: str, db: Session = Depends(get_db)):
         final_net_spread_usd=state.get("net_spread_usd", 0.0),
         final_net_margin_pct=state.get("net_margin_pct"),
         anchor_cif_usd=state.get("anchor_cif_usd", db_camp.anchor_cif_usd or 0.0),
-        audit_transcript=load_campaign_transcript(state, campaign_id, db),
+        audit_transcript=_load_or_reconstruct_transcript(state, campaign_id, db),
     )
     return resp.model_dump()
 

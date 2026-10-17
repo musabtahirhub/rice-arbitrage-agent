@@ -1,22 +1,34 @@
-"""Node: proactive outreach. Prices the opening anchor and pitches a cold SCO to the primary buyer."""
+"""Buyer-side nodes: proactive SCO outreach and buyer counters."""
 from typing import Optional
 
 from langchain_core.runnables import RunnableConfig
 
-from app.agents import fallback_drafts
-from app.agents.prompts import PROACTIVE_COLD_SCO_PROMPT
-from app.agents.state import DealState, coerce_campaign, is_outreach_started
-from app.agents.updates import ProactiveOutreachUpdate
 from app.config import settings
+from app.directory import (
+    get_buyers_for_commodity,
+    get_suppliers_for_commodity,
+    select_primary_buyer,
+)
 from app.logger import get_logger
-from app.models import AuditTranscriptEntry, Campaign
-from app.services.directory import get_buyers_for_commodity, get_suppliers_for_commodity, select_primary_buyer
-from app.services.freight import estimate_freight
-from app.services.llm import generate_email_draft
-from app.services.market import get_benchmark_rate
-from app.services.pricing import DynamicBounds, calculate_campaign_bounds, resolve_buffer_usd
-from app.services.smtp import send_email
-from app.utils.email_text import make_message_id, split_subject_and_body
+from app.models import Campaign, DealState, ParsedEmail, coerce_campaign, coerce_terms, is_outreach_started
+from app.pricing.formulas import calculate_campaign_bounds, resolve_buffer_usd
+from app.pricing.market import estimate_freight, get_benchmark_rate
+from app.prompts import (
+    BUYER_COUNTER_PROMPT,
+)
+from app.schemas import (
+    AuditTranscriptEntry,
+    CounterBuyerUpdate,
+    DynamicBounds,
+    ProactiveOutreachUpdate,
+)
+from app.services.llm_service import (
+    generate_email_draft,
+    generate_proactive_sco_draft,
+    sco_subject,
+)
+from app.services.mail.email_utils import make_message_id, split_subject_and_body
+from app.services.mail.smtp import send_email
 
 logger = get_logger("arbitrage_desk.workflow")
 
@@ -45,22 +57,6 @@ def _calculate_pricing_parameters(
         # ask the buyer for more than we first offered.
         anchor_cif = round(max(spread_anchor, bounds.dynamic_cif_floor), 2)
     return benchmark_fob, freight, bounds, anchor_cif
-
-
-def generate_proactive_sco_draft(
-    campaign: Campaign, anchor_cif: float, buyer_name: str = "Procurement Partner", config: Optional[dict] = None
-) -> str:
-    prompt = PROACTIVE_COLD_SCO_PROMPT.format(
-        desk_name=settings.desk_name,
-        buyer_name=buyer_name,
-        destination_port=campaign.destination_port,
-        commodity=campaign.commodity,
-        broken_percentage=campaign.broken_percentage,
-        target_volume_mt=campaign.target_volume_mt,
-        anchor_cif_usd=anchor_cif,
-        payment_terms=settings.default_payment_terms,
-    )
-    return generate_email_draft(prompt, *fallback_drafts.sco_draft(campaign, anchor_cif, buyer_name), config=config)
 
 
 def _dispatch_sco_email(
@@ -96,7 +92,7 @@ def proactive_outreach_node(state: DealState, config: Optional[RunnableConfig] =
     )
 
     draft = generate_proactive_sco_draft(campaign, anchor_cif, buyer_name, config=config)
-    subject, _ = split_subject_and_body(draft, default_subject=fallback_drafts.sco_subject(campaign))
+    subject, _ = split_subject_and_body(draft, default_subject=sco_subject(campaign))
     sco_msg_id = make_message_id(settings.email_user.strip())
     _dispatch_sco_email(state, buyer_email, draft, subject, sco_msg_id, campaign.campaign_id)
 
@@ -139,3 +135,78 @@ def proactive_outreach_node(state: DealState, config: Optional[RunnableConfig] =
     res = update.model_dump(exclude_none=True)
     res["campaign"] = campaign
     return res
+
+
+def _counter_buyer_draft(
+    campaign: Campaign, buyer: Optional[ParsedEmail], maximizing: bool, curr_round: int, target_price: float,
+    cif_floor: float, reason: str,
+) -> tuple[str, str]:
+    port = campaign.destination_port
+    if maximizing and buyer:
+        subject = f"Negotiation Round {curr_round}: Price Adjustment Request — {campaign.commodity} CIF {port}"
+        body = (
+            f"Dear Buyer,\n\n"
+            f"Thank you for your proposal at USD {buyer.price_usd_per_mt:.2f}/MT. Due to tightened carrier container "
+            f"allocations and updated logistics/freight surcharges on the corridor, our desk requests a modest price "
+            f"adjustment to USD {target_price:.2f}/MT CIF {port}.\n\n"
+            f"Desk Analysis: {reason}\n\n"
+            f"Please confirm if you can accommodate this revised rate to execute the contract.\n\n"
+            f"Warm regards,\nTrading Desk, {settings.desk_name}"
+        )
+        return subject, body
+    subject = f"Counter-Offer — {campaign.commodity} CIF {port}"
+    body = (
+        f"Dear Buyer,\n\n"
+        f"Thank you for your bid. Due to prevailing market benchmark rates and shipping tariffs, "
+        f"our minimum viable selling price is USD {cif_floor:.2f}/MT CIF {port}.\n\n"
+        f"Desk Note: {reason}\n\n"
+        f"Kindly advise if we can proceed at this level.\n\n"
+        f"Warm regards,\nTrading Desk, {settings.desk_name}"
+    )
+    return subject, body
+
+
+def _resolve_target_counter_cif(
+    state: DealState, buyer: Optional[ParsedEmail], action: Optional[str], cif_floor: float
+) -> float:
+    # A trader override applies to this counter only; last_counter_cif_usd is a record, not an input,
+    # otherwise every later counter would repeat the first one.
+    if state.get("override_cif_price") is not None:
+        return float(state["override_cif_price"])
+    if action == "COUNTER_TO_MAXIMIZE" and buyer:
+        return round(buyer.price_usd_per_mt + settings.buyer_counter_step_usd_per_mt, 2)
+    return cif_floor
+
+
+def counter_buyer_node(state: DealState, config: Optional[RunnableConfig] = None) -> dict:
+    cif_floor = state.get("dynamic_cif_floor", 1000.0)
+    campaign = coerce_campaign(state["campaign"])
+    buyer = coerce_terms(state.get("buyer_terms"))
+    reason = state.get("evaluation_reason", "")
+    curr_round = state.get("negotiation_round", 1)
+    action = state.get("action")
+
+    target_price = _resolve_target_counter_cif(state, buyer, action, cif_floor)
+    prompt = BUYER_COUNTER_PROMPT.format(
+        desk_name=settings.desk_name,
+        buyer_name="Procurement Team",
+        commodity=campaign.commodity,
+        destination_port=campaign.destination_port,
+        buyer_offered_cif=buyer.price_usd_per_mt if buyer else 0.0,
+        target_cif=target_price,
+        curr_round=curr_round,
+        max_rounds=campaign.max_negotiation_rounds,
+        action=action or "FLOOR_DEFENSE",
+        evaluation_reason=reason,
+    )
+    fallback = _counter_buyer_draft(
+        campaign, buyer, action == "COUNTER_TO_MAXIMIZE", curr_round, target_price, cif_floor, reason
+    )
+    buyer_msg = generate_email_draft(prompt, *fallback, config=config)
+
+    logger.info(
+        f"[WORKFLOW:Node 4B Counter Buyer] Round {curr_round}: Action='{action}', "
+        f"countering buyer at USD {target_price:.2f}/MT CIF {campaign.destination_port} (Reason: {reason})"
+    )
+    update = CounterBuyerUpdate(deal_status="counter_sent", buyer_draft=buyer_msg, last_counter_cif_usd=target_price)
+    return update.model_dump()

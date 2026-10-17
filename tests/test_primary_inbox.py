@@ -4,10 +4,13 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from app.config import settings
-from app.services import imap, inbound_push
-from app.services.gmail_inbox import PRIMARY_INBOX_QUERY, fetch_latest_messages_by_history, is_primary_inbox_message
-from app.services.gmail_processed_cache import PROCESSED_GMAIL_MESSAGE_IDS
-from app.utils.gmail_payload import parse_gmail_message
+from app.services.mail import gmail_worker, imap
+from app.services.mail.email_utils import PRIMARY_INBOX_QUERY, is_primary_inbox_message
+from app.services.mail.gmail_client import (
+    PROCESSED_GMAIL_MESSAGE_IDS,
+    fetch_latest_messages_by_history,
+    parse_gmail_message,
+)
 
 PRIMARY = ["INBOX", "CATEGORY_PERSONAL", "UNREAD"]
 
@@ -59,10 +62,10 @@ class TestPrimaryInboxLabels(unittest.TestCase):
 
 class TestPushPathFiltering(unittest.TestCase):
     def setUp(self):
-        self._cursor = inbound_push.LAST_SEEN_HISTORY_ID
+        self._cursor = gmail_worker.LAST_SEEN_HISTORY_ID
 
     def tearDown(self):
-        inbound_push.LAST_SEEN_HISTORY_ID = self._cursor
+        gmail_worker.LAST_SEEN_HISTORY_ID = self._cursor
 
     def test_history_listing_is_limited_to_inbox(self):
         PROCESSED_GMAIL_MESSAGE_IDS.pop("g-hist", None)
@@ -71,7 +74,7 @@ class TestPushPathFiltering(unittest.TestCase):
             "history": [{"messagesAdded": [{"message": {"id": "g-hist"}}]}]
         }
         service.users().messages().get.return_value.execute.return_value = {"id": "g-hist", "labelIds": PRIMARY}
-        with patch("app.services.gmail_inbox.get_gmail_service", return_value=service):
+        with patch("app.services.mail.gmail_client.get_gmail_service", return_value=service):
             messages = fetch_latest_messages_by_history("500")
         self.assertEqual(service.users().history().list.call_args.kwargs["labelId"], "INBOX")
         self.assertEqual(messages[0]["labelIds"], PRIMARY)
@@ -79,33 +82,33 @@ class TestPushPathFiltering(unittest.TestCase):
     def test_non_primary_message_is_skipped_before_the_graph(self):
         for labels in (["INBOX", "CATEGORY_PROMOTIONS"], ["SPAM"], ["INBOX", "TRASH"]):
             with self.subTest(labels=labels), \
-                 patch("app.services.inbound_push.find_open_campaign") as find, \
-                 patch("app.services.inbound_push.process_inbound_message_transaction") as process, \
+                 patch("app.services.mail.gmail_worker.find_open_campaign") as find, \
+                 patch("app.services.mail.gmail_worker.process_inbound_message_transaction") as process, \
                  self.assertLogs("arbitrage_desk", level="DEBUG") as logs:
-                inbound_push.handle_push_message(_push_message("g-promo", labels), {"desk@arbitrage.com"})
+                gmail_worker._handle_single_push_message(_push_message("g-promo", labels), {"desk@arbitrage.com"})
             find.assert_not_called()
             process.assert_not_called()
             self.assertIn("Skipping non-primary inbox message: g-promo", "\n".join(logs.output))
 
     def test_primary_message_reaches_the_transaction(self):
         db_camp = MagicMock(id="CAMP-PRIMARY")
-        with patch("app.services.inbound_push.find_open_campaign", return_value=db_camp), \
-             patch("app.services.inbound_push.process_inbound_message_transaction") as process, \
-             patch("app.db.SessionLocal"):
-            inbound_push.handle_push_message(_push_message("g-primary", PRIMARY), {"desk@arbitrage.com"})
+        with patch("app.services.mail.gmail_worker.find_open_campaign", return_value=db_camp), \
+             patch("app.services.mail.gmail_worker.process_inbound_message_transaction") as process, \
+             patch("app.db.database.SessionLocal"):
+            gmail_worker._handle_single_push_message(_push_message("g-primary", PRIMARY), {"desk@arbitrage.com"})
         process.assert_called_once()
         inbound = process.call_args.args[1]
         self.assertEqual((inbound.message_id, inbound.thread_id), ("<g-primary@buyer.example>", "thread-g-primary"))
 
     def test_skipped_message_is_acknowledged_so_it_is_not_refetched(self):
-        inbound_push.LAST_SEEN_HISTORY_ID = "100"
+        gmail_worker.LAST_SEEN_HISTORY_ID = "100"
         batch = [_push_message("g-promo", ["INBOX", "CATEGORY_PROMOTIONS"]), _push_message("g-primary", PRIMARY)]
-        with patch("app.services.inbound_push.fetch_latest_messages_by_history", return_value=batch), \
-             patch("app.services.inbound_push.find_open_campaign", return_value=MagicMock(id="CAMP-PRIMARY")), \
-             patch("app.services.inbound_push.process_inbound_message_transaction") as process, \
-             patch("app.services.inbound_push.mark_gmail_message_processed") as mark, \
-             patch("app.db.SessionLocal"):
-            asyncio.run(inbound_push.process_incoming_gmail_event("101"))
+        with patch("app.services.mail.gmail_worker.fetch_latest_messages_by_history", return_value=batch), \
+             patch("app.services.mail.gmail_worker.find_open_campaign", return_value=MagicMock(id="CAMP-PRIMARY")), \
+             patch("app.services.mail.gmail_worker.process_inbound_message_transaction") as process, \
+             patch("app.services.mail.gmail_worker.mark_gmail_message_processed") as mark, \
+             patch("app.db.database.SessionLocal"):
+            asyncio.run(gmail_worker.process_incoming_gmail_event("101"))
         self.assertEqual([c.args[0] for c in mark.call_args_list], ["g-promo", "g-primary"])
         self.assertEqual(process.call_count, 1)
         self.assertEqual(process.call_args.args[1].message_id, "<g-primary@buyer.example>")

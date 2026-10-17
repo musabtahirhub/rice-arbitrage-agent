@@ -1,18 +1,51 @@
-"""Node: counter the supplier, either for a volume discount or to enforce the FOB ceiling."""
+"""Supplier-side node: counter the supplier for a discount or to enforce the FOB ceiling."""
 from typing import Optional
 
 from langchain_core.runnables import RunnableConfig
 
-from app.agents import fallback_drafts
-from app.agents.prompts import SUPPLIER_RFQ_PROMPT
-from app.agents.state import DealState, coerce_campaign, coerce_terms
-from app.agents.updates import CounterSupplierUpdate
 from app.config import settings
 from app.logger import get_logger
-from app.models import Campaign, ParsedEmail
-from app.services.llm import generate_email_draft
+from app.models import Campaign, DealState, ParsedEmail, coerce_campaign, coerce_terms
+from app.prompts import (
+    SUPPLIER_RFQ_PROMPT,
+)
+from app.schemas import (
+    CounterSupplierUpdate,
+)
+from app.services.llm_service import (
+    generate_email_draft,
+)
 
 logger = get_logger("arbitrage_desk.workflow")
+
+
+def _counter_supplier_draft(
+    campaign: Campaign, supplier: Optional[ParsedEmail], maximizing: bool, curr_round: int, target_ceiling: float,
+    fob_ceiling: float, reason: str,
+) -> tuple[str, str]:
+    port = campaign.origin_port_default
+    if maximizing and supplier:
+        subject = f"Negotiation Round {curr_round}: Volume Discount Request — {campaign.commodity} FOB {port}"
+        body = (
+            f"Dear Exporter,\n\n"
+            f"Thank you for your quotation of USD {supplier.price_usd_per_mt:.2f}/MT. Given our export volume "
+            f"commitment and ready LC facility, we request an export bulk discount to USD {target_ceiling:.2f}/MT "
+            f"FOB {port}.\n\n"
+            f"Desk Analysis: {reason}\n\n"
+            f"Please confirm if you can confirm allocation at this revised level.\n\n"
+            f"Warm regards,\nProcurement Desk, {settings.desk_name}"
+        )
+        return subject, body
+    subject = f"Counter-Bid — {campaign.commodity} FOB {port}"
+    body = (
+        f"Dear Exporter,\n\n"
+        f"Thank you for your quotation. Based on our container freight and volume commitments, "
+        f"our ceiling acquisition price for this parcel is USD {fob_ceiling:.2f}/MT FOB.\n\n"
+        f"Desk Note: {reason}\n\n"
+        f"Please confirm if you can meet our target price to lock this allocation.\n\n"
+        f"Warm regards,\nProcurement Desk, {settings.desk_name}"
+    )
+    return subject, body
 
 
 def _calculate_target_supplier_ceiling(
@@ -50,7 +83,7 @@ def counter_supplier_node(state: DealState, config: Optional[RunnableConfig] = N
 
     target_ceiling = _calculate_target_supplier_ceiling(supplier, action, fob_ceiling)
     prompt = _build_counter_supplier_prompt(campaign, supplier, target_ceiling, action, reason)
-    fallback = fallback_drafts.counter_supplier_draft(
+    fallback = _counter_supplier_draft(
         campaign, supplier, action == "COUNTER_TO_MAXIMIZE", curr_round, target_ceiling, fob_ceiling, reason
     )
     supplier_msg = generate_email_draft(prompt, *fallback, config=config)

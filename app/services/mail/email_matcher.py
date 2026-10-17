@@ -3,8 +3,8 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
-import app.db
-from app.db import CampaignModel, TradeAuditModel
+import app.db.database
+from app.db.db_models import CampaignModel, TradeAuditModel
 from app.logger import get_logger
 from app.models import CLOSED_DEAL_STATUSES
 
@@ -68,7 +68,7 @@ def match_email_to_campaign(subject: str, body: str, sender: str, db: Optional[S
 
     should_close_session = False
     if db is None:
-        db = app.db.SessionLocal()
+        db = app.db.database.SessionLocal()
         should_close_session = True
 
     try:

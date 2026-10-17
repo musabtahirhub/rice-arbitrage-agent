@@ -1,15 +1,62 @@
-"""Commodity benchmark rates (USD/MT FOB): live Yahoo Finance or scraped feed, cached, with static fallback."""
+"""Commodity benchmark rates (live Yahoo Finance or scraped feed, cached) and port-to-port freight estimates."""
+import json
 import re
+import time
 from typing import Optional
 
 import httpx
 from bs4 import BeautifulSoup
 
-from app.config import settings
+from app.config import PROJECT_ROOT, settings
 from app.logger import get_logger
-from app.services.market_cache import load_cache, save_benchmark_rates
 
 logger = get_logger("arbitrage_desk.market")
+
+
+CACHE_FILE = PROJECT_ROOT / settings.market_cache_file
+
+
+CACHE_TTL_SECONDS = settings.market_cache_ttl_seconds
+
+
+def load_cache() -> Optional[dict]:
+    """The cached payload while it is younger than the TTL, else None."""
+    if not CACHE_FILE.exists():
+        return None
+    try:
+        with open(CACHE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if time.time() - data.get("timestamp", 0) < CACHE_TTL_SECONDS:
+            return data
+    except Exception as e:
+        logger.warning(f"Failed to read market cache: {e}")
+    return None
+
+
+def save_cache(payload: dict) -> None:
+    try:
+        with open(CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+    except Exception as e:
+        logger.warning(f"Failed to write market cache: {e}")
+
+
+def save_benchmark_rates(rates: dict[str, float], source: str) -> None:
+    """Replace the cached rates, keeping any freight quotes already recorded."""
+    existing = load_cache() or {}
+    save_cache({
+        "timestamp": time.time(),
+        "source": source,
+        "rates": rates,
+        "freight_quotes": existing.get("freight_quotes", {}),
+    })
+
+
+def save_freight_quote(lane_key: str, quote: dict, default_rates: dict[str, float]) -> None:
+    cached = load_cache() or {"timestamp": time.time(), "rates": default_rates, "freight_quotes": {}}
+    cached.setdefault("freight_quotes", {})[lane_key] = {**quote, "updated_at": time.time()}
+    save_cache(cached)
+
 
 STATIC_BENCHMARKS: dict[str, float] = {
     "basmati 1121": settings.default_benchmark_rate,
@@ -23,12 +70,18 @@ STATIC_BENCHMARKS: dict[str, float] = {
     "parboiled rice 5%": 499.0,
 }
 
+
 YAHOO_RICE_URL = "https://query1.finance.yahoo.com/v8/finance/chart/ZR=F?interval=1d&range=5d"
+
+
 CWT_TO_MT_FACTOR = 22.046
+
+
 _BROWSER_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/120.0.0.0 Safari/537.36"
 }
+
 
 # Row index in the Thai Rice Exporters price table -> benchmark keys it feeds.
 _THAI_PRICE_ROWS = {3: ("pathumthani fragrant",), 5: ("thai white 5%",), 8: ("thai white 25%",)}
@@ -146,3 +199,40 @@ def get_benchmark_rate(commodity: str, broken_pct: float = 5.0) -> float:
     rates = fetch_live_market_data()
     base_rate = _lookup_commodity_price(rates, commodity.lower().strip())
     return round(_apply_broken_penalty(base_rate, broken_pct), 2)
+
+
+BASE_FREIGHT_MATRIX: dict[tuple[str, str], float] = {
+    ("karachi", "jebel ali"): 45.0,
+    ("karachi", "dammam"): 50.0,
+    ("mundra", "jebel ali"): 55.0,
+    ("mundra", "dammam"): 60.0,
+    ("bangkok", "jebel ali"): 75.0,
+    ("bangkok", "dammam"): 80.0,
+    ("ho chi minh", "jebel ali"): 70.0,
+    ("ho chi minh", "dammam"): 75.0,
+}
+
+
+def _resolve_base_freight_rate(origin_port: str, destination_port: str) -> float:
+    direct_rate = BASE_FREIGHT_MATRIX.get((origin_port, destination_port))
+    if direct_rate is not None:
+        return direct_rate
+    for (orig_candidate, dest_candidate), rate in BASE_FREIGHT_MATRIX.items():
+        if orig_candidate in origin_port and dest_candidate in destination_port:
+            return rate
+    return settings.default_freight_rate
+
+
+def estimate_freight(origin_port: str, destination_port: str, fuel_surcharge_pct: Optional[float] = None) -> float:
+    surcharge = fuel_surcharge_pct if fuel_surcharge_pct is not None else settings.default_fuel_surcharge_pct
+    orig = origin_port.lower().strip()
+    dest = destination_port.lower().strip()
+
+    base_rate = _resolve_base_freight_rate(orig, dest)
+    effective_freight = round(base_rate * (1.0 + surcharge / 100.0), 2)
+    save_freight_quote(
+        f"{orig}->{dest}",
+        {"base_rate_usd": base_rate, "fuel_surcharge_pct": surcharge, "effective_freight_usd": effective_freight},
+        STATIC_BENCHMARKS,
+    )
+    return effective_freight

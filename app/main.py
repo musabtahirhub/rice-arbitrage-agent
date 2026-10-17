@@ -2,21 +2,21 @@
 import asyncio
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy.exc import OperationalError
 
-from app.agents.workflow import setup_checkpointer
-from app.api.approvals import router as approvals_router
-from app.api.campaigns import router as campaigns_router
-from app.api.negotiation import router as negotiation_router
-from app.api.webhooks import router as webhooks_router
 from app.config import STATIC_DIR, settings
-from app.db import init_db
+from app.db.database import init_db
+from app.graph.workflow import setup_checkpointer
 from app.logger import setup_logger
-from app.services.gmail_inbox import setup_gmail_watch, stop_gmail_watch
-from app.services.inbound_polling import email_polling_worker
-from app.services.inbound_push import seed_history_cursor
+from app.routes.campaigns import router as campaigns_router
+from app.routes.negotiation import router as negotiation_router
+from app.routes.webhooks import router as webhooks_router
+from app.services.mail.gmail_client import setup_gmail_watch, stop_gmail_watch
+from app.services.mail.gmail_worker import email_polling_worker, seed_history_cursor
 
 logger = setup_logger("arbitrage_desk")
 
@@ -101,6 +101,14 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title=f"{settings.desk_name} - Physical Commodity Arbitrage", version="2.0.0", lifespan=lifespan)
 
+
+@app.exception_handler(OperationalError)
+async def database_unavailable_handler(request: Request, exc: OperationalError) -> JSONResponse:
+    """Postgres down or unreachable: answer 503 with a clear message instead of a bare 500 and a long traceback."""
+    logger.error(f"[DATABASE] {request.method} {request.url.path} failed, database unavailable: {exc.orig or exc}")
+    detail = "Database unavailable. Check DATABASE_URL and that Postgres is running."
+    return JSONResponse(status_code=503, content={"detail": detail})
+
 cors_allows_any_origin = "*" in settings.cors_origins
 if cors_allows_any_origin:
     logger.warning(
@@ -117,7 +125,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-for router in (campaigns_router, webhooks_router, negotiation_router, approvals_router):
+for router in (campaigns_router, webhooks_router, negotiation_router):
     app.include_router(router)
 
 if STATIC_DIR.exists():
