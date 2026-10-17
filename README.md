@@ -1,6 +1,6 @@
 # 🌾 Autonomous Commodity Arbitrage Desk
 
-An AI-assisted trading desk that runs physical **rice arbitrage** between Asian mills (Pakistan, Thailand, Vietnam) and Middle Eastern buyers (UAE, Saudi Arabia). It negotiates both sides by email, prices every deal with deterministic math, and only closes after a human approves.
+An AI-assisted trading desk that runs physical **commodity arbitrage** between Asian mills (Pakistan, Thailand, Vietnam) and Middle Eastern buyers (UAE, Saudi Arabia). It negotiates both sides by email, prices every deal with deterministic math, and only closes after a human approves.
 
 **Stack:** Python 3.11 · FastAPI · LangGraph · Google Gemini 2.5 Flash · Langfuse · PostgreSQL · Gmail API
 
