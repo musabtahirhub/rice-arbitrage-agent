@@ -20,6 +20,7 @@ from app.schemas import (
     EvaluateRiskUpdate,
     FetchMarketDataUpdate,
     ParsedBuyerTermsUpdate,
+    ParsedNoTermsUpdate,
     ParsedSupplierTermsUpdate,
 )
 from app.services.llm_service import (
@@ -27,6 +28,7 @@ from app.services.llm_service import (
     extract_email_terms,
     generate_email_draft,
 )
+from app.services.mail.email_utils import rfq_subject, strip_quoted_reply
 
 logger = get_logger("arbitrage_desk.workflow")
 
@@ -51,7 +53,16 @@ def _supplier_rfq_draft(
     return subject, body
 
 
-def _resolve_desk_proposed_rate(state: DealState) -> float:
+def resolve_desk_proposed_rate(state: DealState, role: str) -> float:
+    """The rate the desk last put to this counterparty: what a bare "accepted" from them agrees to.
+    Buyers see CIF prices, suppliers FOB prices, so the two sides never share a rate."""
+    if role == "supplier":
+        return (
+            state.get("last_counter_fob_usd")
+            or state.get("target_fob_ceiling")
+            or state.get("dynamic_fob_ceiling")
+            or DEFAULT_PROPOSED_PRICE
+        )
     return (
         state.get("last_counter_cif_usd")
         or state.get("dynamic_cif_floor")
@@ -103,13 +114,18 @@ def _process_parsed_buyer_terms(
         f"intent='{terms.intent}', buyer_accepted={buyer_accepted}"
     )
 
-    update = ParsedBuyerTermsUpdate(buyer_terms=terms, pipeline_step=2, buyer_accepted=buyer_accepted)
+    update = ParsedBuyerTermsUpdate(
+        buyer_terms=terms, pipeline_step=2, buyer_accepted=buyer_accepted, inbound_intent=terms.intent
+    )
     if not state.get("supplier_terms"):
         freight = state.get("freight_cost_usd") or estimate_freight(
             campaign.origin_port_default, campaign.destination_port
         )
         update.target_fob_ceiling, update.supplier_draft = _generate_initial_supplier_rfq(
             campaign, terms, freight, config=config
+        )
+        update.supplier_thread_subject = state.get("supplier_thread_subject") or rfq_subject(
+            campaign.campaign_id, campaign.commodity, campaign.origin_port_default
         )
         update.pipeline_step = 3
 
@@ -123,7 +139,9 @@ def _process_parsed_supplier_terms(terms: ParsedEmail) -> dict:
         f"[WORKFLOW:Node 1] Ingested supplier terms: price=${terms.price_usd_per_mt:.2f}/MT FOB, "
         f"port='{terms.port}', qty={terms.quantity_mt:,.0f}MT"
     )
-    res = ParsedSupplierTermsUpdate(supplier_terms=terms, pipeline_step=3).model_dump(exclude_none=True)
+    res = ParsedSupplierTermsUpdate(
+        supplier_terms=terms, pipeline_step=3, inbound_intent=terms.intent
+    ).model_dump(exclude_none=True)
     res["supplier_terms"] = terms
     return res
 
@@ -131,17 +149,45 @@ def _process_parsed_supplier_terms(terms: ParsedEmail) -> dict:
 def parse_incoming_email_node(state: DealState, config: Optional[RunnableConfig] = None) -> dict:
     role = state.get("active_role", "buyer")
     campaign = coerce_campaign(state["campaign"])
-    desk_proposed_rate = _resolve_desk_proposed_rate(state)
+    desk_proposed_rate = resolve_desk_proposed_rate(state, role)
     deal_context = {
         "last_proposed_price": desk_proposed_rate,
         "commodity": campaign.commodity,
         "default_volume_mt": campaign.target_volume_mt,
     }
 
-    terms = extract_email_terms(state.get("latest_email", ""), role, deal_context=deal_context, config=config)
+    raw_email = state.get("latest_email", "")
+    # Only the counterparty's new text: quoted history repeats the desk's own prices.
+    reply_text = strip_quoted_reply(raw_email) or raw_email
+    terms = extract_email_terms(reply_text, role, deal_context=deal_context, config=config)
+    if terms.intent in ("REJECTION", "INQUIRY"):
+        return _process_priceless_reply(terms, role)
     if role == "buyer":
         return _process_parsed_buyer_terms(terms, state, campaign, desk_proposed_rate, config=config)
     return _process_parsed_supplier_terms(terms)
+
+
+def _process_priceless_reply(terms: ParsedEmail, role: str) -> dict:
+    """A decline or a question: keep the counterparty's previous terms (a $0 price would read as a
+    free supplier quote or a worthless buyer bid) and let route_after_parse close the deal or answer the question."""
+    party = "Buyer" if role == "buyer" else "Supplier"
+    summary = terms.summary if terms.summary and not terms.summary.startswith("Extracted via") else ""
+    if terms.intent == "REJECTION":
+        reason = f"{party} declined the deal."
+    else:
+        reason = f"{party} asked a question with no price; answered from the deal facts."
+    reason += f" {summary}" if summary else ""
+    logger.info(f"[WORKFLOW:Node 1] {party} email has intent '{terms.intent}': terms unchanged. {reason}")
+    return ParsedNoTermsUpdate(inbound_intent=terms.intent, evaluation_reason=reason).model_dump()
+
+
+def route_after_parse(state: DealState) -> Literal["fetch_market_data", "reject_deal", "handle_general_inquiry"]:
+    intent = state.get("inbound_intent")
+    if intent == "REJECTION":
+        return "reject_deal"
+    if intent == "INQUIRY":
+        return "handle_general_inquiry"
+    return "fetch_market_data"
 
 
 def fetch_market_data_node(state: DealState, config: Optional[RunnableConfig] = None) -> dict:

@@ -30,6 +30,15 @@ _REPLY_PREFIX_RE = re.compile(r"^(?:re|fwd|fw):\s*", re.IGNORECASE)
 _ATTRIBUTION_LINE_RE = re.compile(r"^On\s+.+wrote:$", re.IGNORECASE)
 
 
+_OUTLOOK_SEPARATOR_RE = re.compile(r"^_{10,}$")
+
+
+_OUTLOOK_FROM_RE = re.compile(r"^\*?From:\*?\s+\S", re.IGNORECASE)
+
+
+_OUTLOOK_SENT_RE = re.compile(r"^\*?(?:Sent|Date):\*?\s+\S", re.IGNORECASE)
+
+
 def _split_labeled_draft(raw: str) -> Optional[tuple[str, str]]:
     """'SUBJECT: ...' plus 'BODY: ...' blocks, the format the LLM prompts ask for."""
     sub_match = _LABELED_SUBJECT_RE.search(raw)
@@ -63,14 +72,50 @@ def normalize_thread_subject(subject: str, thread_subject: Optional[str] = None)
     return f"Re: {strip_reply_prefix(base)}"
 
 
+def tag_campaign_subject(subject: str, campaign_id: str) -> str:
+    """Subject carrying the campaign id: each campaign gets its own conversation in the counterparty's
+    mailbox (identical subjects get merged into one Gmail thread), and replies match the campaign by id."""
+    subject = (subject or "").strip()
+    if not campaign_id or campaign_id.lower() in subject.lower():
+        return subject
+    return f"{subject} [{campaign_id}]"
+
+
+def rfq_subject(campaign_id: str, commodity: str, origin_port: str) -> str:
+    """Subject of the supplier conversation for one campaign (first RFQ, then every reply as 'Re: ...')."""
+    return tag_campaign_subject(f"RFQ — {commodity} FOB {origin_port}", campaign_id)
+
+
+def with_draft_subject(draft: str, subject: str) -> str:
+    """The draft with its subject line replaced."""
+    _, body = split_subject_and_body(draft, default_subject=subject)
+    return f"Subject: {subject}\n\n{body}"
+
+
+def _starts_quoted_history(lines: list[str], i: int) -> bool:
+    """True when line i opens the quoted original: a reply attribution (Gmail wraps long ones over two
+    lines), an Outlook header block or separator, or a forwarded/original-message marker."""
+    line = lines[i].strip()
+    next_line = lines[i + 1].strip() if i + 1 < len(lines) else ""
+    if _ATTRIBUTION_LINE_RE.match(line):
+        return True
+    if line.lower().startswith("on ") and _ATTRIBUTION_LINE_RE.match(f"{line} {next_line}"):
+        return True
+    if line.startswith(("-----Original Message-----", "---------- Forwarded message")):
+        return True
+    if _OUTLOOK_SEPARATOR_RE.match(line):
+        return True
+    return bool(_OUTLOOK_FROM_RE.match(line) and _OUTLOOK_SENT_RE.match(next_line))
+
+
 def strip_quoted_reply(raw_text: str) -> str:
     """Drop quoted lines ('> ...') and everything from the reply attribution or forwarded original onward."""
+    lines = (raw_text or "").strip().splitlines()
     clean_lines = []
-    for line in raw_text.strip().splitlines():
-        stripped = line.strip()
-        if stripped.startswith(">"):
+    for i, line in enumerate(lines):
+        if line.strip().startswith(">"):
             continue
-        if _ATTRIBUTION_LINE_RE.match(stripped) or stripped.startswith("-----Original Message-----"):
+        if _starts_quoted_history(lines, i):
             break
         clean_lines.append(line)
     return "\n".join(clean_lines).strip()

@@ -14,7 +14,12 @@ from app.logger import get_logger
 from app.models import Campaign, ParsedEmail
 from app.pricing.market import get_benchmark_rate
 from app.services.campaign_runner import build_supplier_quote_email
-from app.services.mail.email_utils import normalize_thread_subject, split_subject_and_body
+from app.services.mail.email_utils import (
+    normalize_thread_subject,
+    rfq_subject,
+    split_subject_and_body,
+    with_draft_subject,
+)
 from app.services.mail.gmail_client import send_reply
 from app.services.mail.inbound_dedupe import claim_message, complete_message, message_key, release_message
 from app.services.mail.inbound_state import (
@@ -61,10 +66,12 @@ def process_inbound_message_transaction(
     complete_message(db, key)
 
 
-def _supplier_reply_action(had_supplier_terms: bool, action: Optional[str]) -> str:
-    if not had_supplier_terms:
-        return "SUPPLIER_RFQ"
-    return "REJECT_SUPPLIER" if action == "REJECT_HARD" else "COUNTER_SUPPLIER"
+def _supplier_reply_action(had_supplier_terms: bool, action: Optional[str], inbound_intent: Optional[str]) -> str:
+    if action == "REJECT_HARD":
+        return "REJECT_SUPPLIER"
+    if inbound_intent == "INQUIRY":
+        return "ANSWER_INQUIRY"
+    return "COUNTER_SUPPLIER" if had_supplier_terms else "SUPPLIER_RFQ"
 
 
 def _send_supplier_reply(
@@ -77,14 +84,20 @@ def _send_supplier_reply(
         return
 
     camp: Campaign = updated_state["campaign"]
-    send_reply(
-        contacts.supplier_email, supp_msg, updated_state.get("last_supplier_message_id"),
-        updated_state.get("supplier_references"), f"Urgent RFQ — {camp.commodity} FOB {camp.origin_port_default}",
-        thread_id, use_gmail_api,
+    thread_subject = updated_state.get("supplier_thread_subject") or rfq_subject(
+        campaign_id, camp.commodity, camp.origin_port_default
     )
-    supp_sub, _ = split_subject_and_body(
-        supp_msg, default_subject=f"Urgent RFQ / Volume Lock — {camp.commodity} FOB {camp.origin_port_default}"
-    )
+    if updated_state.get("last_supplier_message_id"):
+        # The supplier has written in: answer in their thread as "Re: <campaign RFQ subject>".
+        send_reply(
+            contacts.supplier_email, supp_msg, updated_state.get("last_supplier_message_id"),
+            updated_state.get("supplier_references"), thread_subject, thread_id, use_gmail_api,
+        )
+    else:
+        # First contact for this campaign: a new conversation under the campaign's own subject, no "Re:".
+        supp_msg = with_draft_subject(supp_msg, thread_subject)
+        send_reply(contacts.supplier_email, supp_msg, None, None, None, thread_id, use_gmail_api)
+    supp_sub, _ = split_subject_and_body(supp_msg, default_subject=thread_subject)
     supp_terms = updated_state.get("supplier_terms")
     record_exchange(
         updated_state, db, campaign_id,
@@ -92,7 +105,9 @@ def _send_supplier_reply(
         sender=desk_party(),
         recipient=f"{contacts.supplier_name} <{contacts.supplier_email}>",
         role="agent",
-        action=_supplier_reply_action(had_supplier_terms, updated_state.get("action")),
+        action=_supplier_reply_action(
+            had_supplier_terms, updated_state.get("action"), updated_state.get("inbound_intent")
+        ),
         subject=supp_sub,
         message=supp_msg,
         direction="OUTBOUND",
@@ -143,7 +158,9 @@ def _send_buyer_reply(
         sender=desk_party(),
         recipient=f"{contacts.buyer_name} <{contacts.buyer_email}>",
         role="agent",
-        action=action or "COUNTER_BUYER",
+        action=(
+            "ANSWER_INQUIRY" if updated_state.get("inbound_intent") == "INQUIRY" else (action or "COUNTER_BUYER")
+        ),
         subject=thread_sub,
         message=buyer_msg,
         direction="OUTBOUND",

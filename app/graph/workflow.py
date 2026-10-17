@@ -3,6 +3,8 @@
 Always fetch the graph through get_trade_graph() at call time: setup_checkpointer() (app startup) and
 tests replace ``trade_graph`` / ``checkpointer`` on this module.
 """
+import time
+
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.postgres import PostgresSaver
 
@@ -31,11 +33,29 @@ def _install_checkpointer(saver):
     return saver
 
 
+# Arbitrary constant key for pg_advisory_lock, unique to checkpointer setup.
+_SETUP_LOCK_KEY = 7_302_118_224
+_SETUP_LOCK_TIMEOUT_SECONDS = 60
+
+
 def _open_postgres_saver() -> PostgresSaver:
     if pool.closed:
         pool.open()
     saver = PostgresSaver(pool, serde=build_checkpoint_serde())
-    saver.setup()
+    # Every uvicorn worker runs this at startup; concurrent setup() calls can collide while creating the
+    # checkpoint tables, so serialize them with a session-level advisory lock. Poll with pg_try_advisory_lock
+    # rather than blocking in pg_advisory_lock: a statement left waiting counts as an open transaction, and
+    # setup()'s CREATE INDEX CONCURRENTLY waits for every open transaction, so a blocked waiter deadlocks it.
+    with pool.connection() as conn:
+        deadline = time.monotonic() + _SETUP_LOCK_TIMEOUT_SECONDS
+        while not conn.execute("SELECT pg_try_advisory_lock(%s) AS locked", (_SETUP_LOCK_KEY,)).fetchone()["locked"]:
+            if time.monotonic() > deadline:
+                raise TimeoutError("timed out waiting for another worker to finish checkpointer setup")
+            time.sleep(0.5)
+        try:
+            saver.setup()
+        finally:
+            conn.execute("SELECT pg_advisory_unlock(%s)", (_SETUP_LOCK_KEY,))
     return saver
 
 

@@ -90,6 +90,10 @@ class Settings(BaseSettings):
     default_origin_port: str = "Karachi"
     default_payment_terms: str = "100% LC at sight"
     default_broken_percentage: float = 5.0
+    # Standing trade facts the desk may quote when answering counterparty questions (general inquiries).
+    default_packing_spec: str = "New 50kg PP bags, containerized in 20ft FCL"
+    default_shipment_window: str = "Prompt shipment, within 30 days of LC opening"
+    default_inspection: str = "SGS / Bureau Veritas quality and weight certificate at load port"
 
     default_min_profit_per_mt_hard: float = 50.0
     default_min_profit_per_mt_soft: float = 120.0

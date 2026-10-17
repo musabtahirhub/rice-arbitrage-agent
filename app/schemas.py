@@ -101,8 +101,10 @@ class ParsedBuyerTermsUpdate(BaseModel):
     buyer_terms: Any  # ParsedEmail instance
     pipeline_step: int = 2
     buyer_accepted: bool = False
+    inbound_intent: str = "COUNTER_OFFER"
     target_fob_ceiling: Optional[float] = None
     supplier_draft: Optional[str] = None
+    supplier_thread_subject: Optional[str] = None
 
 
 class ParsedSupplierTermsUpdate(BaseModel):
@@ -112,6 +114,14 @@ class ParsedSupplierTermsUpdate(BaseModel):
 
     supplier_terms: Any  # ParsedEmail instance
     pipeline_step: int = 3
+    inbound_intent: str = "COUNTER_OFFER"
+
+
+class ParsedNoTermsUpdate(BaseModel):
+    """State update for a decline or a price-less question: the counterparty's stored terms stay as they were."""
+
+    inbound_intent: str
+    evaluation_reason: str
 
 
 class FetchMarketDataUpdate(BaseModel):
@@ -140,6 +150,7 @@ class CounterBuyerUpdate(BaseModel):
 class CounterSupplierUpdate(BaseModel):
     deal_status: str = "counter_sent"
     supplier_draft: str = ""
+    last_counter_fob_usd: Optional[float] = None
 
 
 class ConfirmDealUpdate(BaseModel):
@@ -148,6 +159,13 @@ class ConfirmDealUpdate(BaseModel):
     action: str = "ACCEPT_AND_CLOSE"
     supplier_draft: str = ""
     buyer_draft: str = ""
+
+
+class GeneralInquiryUpdate(BaseModel):
+    """Answer to a counterparty question. Only the drafts change: terms, round and deal status are kept."""
+
+    buyer_draft: str = ""
+    supplier_draft: str = ""
 
 
 class RejectDealUpdate(BaseModel):

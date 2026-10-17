@@ -15,6 +15,7 @@ from app.pricing.formulas import calculate_campaign_bounds, resolve_buffer_usd
 from app.pricing.market import estimate_freight, get_benchmark_rate
 from app.prompts import (
     BUYER_COUNTER_PROMPT,
+    BUYER_HOLDING_PROMPT,
 )
 from app.schemas import (
     AuditTranscriptEntry,
@@ -27,7 +28,12 @@ from app.services.llm_service import (
     generate_proactive_sco_draft,
     sco_subject,
 )
-from app.services.mail.email_utils import make_message_id, split_subject_and_body
+from app.services.mail.email_utils import (
+    make_message_id,
+    split_subject_and_body,
+    tag_campaign_subject,
+    with_draft_subject,
+)
 from app.services.mail.smtp import send_email
 
 logger = get_logger("arbitrage_desk.workflow")
@@ -93,6 +99,8 @@ def proactive_outreach_node(state: DealState, config: Optional[RunnableConfig] =
 
     draft = generate_proactive_sco_draft(campaign, anchor_cif, buyer_name, config=config)
     subject, _ = split_subject_and_body(draft, default_subject=sco_subject(campaign))
+    subject = tag_campaign_subject(subject, campaign.campaign_id)
+    draft = with_draft_subject(draft, subject)
     sco_msg_id = make_message_id(settings.email_user.strip())
     _dispatch_sco_email(state, buyer_email, draft, subject, sco_msg_id, campaign.campaign_id)
 
@@ -166,6 +174,44 @@ def _counter_buyer_draft(
     return subject, body
 
 
+def _buyer_holding_draft(campaign: Campaign, buyer: ParsedEmail) -> tuple[str, str]:
+    port = campaign.destination_port
+    subject = f"Acceptance Noted — {campaign.commodity} CIF {port}"
+    body = (
+        f"Dear Buyer,\n\n"
+        f"Thank you for accepting our offer of USD {buyer.price_usd_per_mt:.2f}/MT CIF {port} for "
+        f"{buyer.quantity_mt:,.0f} MT of {campaign.commodity}.\n\n"
+        f"We are now securing the physical allocation with our mill and will send the formal contract "
+        f"confirmation shortly. No further action is needed from your side.\n\n"
+        f"Warm regards,\nTrading Desk, {settings.desk_name}"
+    )
+    return subject, body
+
+
+def _acknowledge_buyer_acceptance(
+    campaign: Campaign, buyer: ParsedEmail, config: Optional[RunnableConfig] = None
+) -> dict:
+    """The buyer accepted but the supplier is not locked yet (zero-risk: no confirmation). Acknowledge
+    instead of countering, so the buyer is not asked to accept the same price again."""
+    prompt = BUYER_HOLDING_PROMPT.format(
+        desk_name=settings.desk_name,
+        buyer_name="Procurement Team",
+        commodity=campaign.commodity,
+        quantity_mt=buyer.quantity_mt,
+        accepted_cif=buyer.price_usd_per_mt,
+        destination_port=campaign.destination_port,
+    )
+    buyer_msg = generate_email_draft(prompt, *_buyer_holding_draft(campaign, buyer), config=config)
+    logger.info(
+        f"[WORKFLOW:Node 4B Counter Buyer] Buyer accepted USD {buyer.price_usd_per_mt:.2f}/MT CIF; "
+        f"supplier allocation pending, sending acknowledgement instead of a counter."
+    )
+    update = CounterBuyerUpdate(
+        deal_status="counter_sent", buyer_draft=buyer_msg, last_counter_cif_usd=buyer.price_usd_per_mt
+    )
+    return update.model_dump()
+
+
 def _resolve_target_counter_cif(
     state: DealState, buyer: Optional[ParsedEmail], action: Optional[str], cif_floor: float
 ) -> float:
@@ -185,6 +231,10 @@ def counter_buyer_node(state: DealState, config: Optional[RunnableConfig] = None
     reason = state.get("evaluation_reason", "")
     curr_round = state.get("negotiation_round", 1)
     action = state.get("action")
+
+    awaiting_supplier = not state.get("supplier_terms")
+    if buyer and state.get("buyer_accepted") and awaiting_supplier and state.get("override_cif_price") is None:
+        return _acknowledge_buyer_acceptance(campaign, buyer, config=config)
 
     target_price = _resolve_target_counter_cif(state, buyer, action, cif_floor)
     prompt = BUYER_COUNTER_PROMPT.format(

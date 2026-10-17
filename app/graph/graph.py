@@ -5,12 +5,18 @@ from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.graph import END, StateGraph
 
 from app.graph.agents.buyer_agent import counter_buyer_node, proactive_outreach_node
-from app.graph.agents.finalization import approval_gate_node, confirm_deal_node, reject_deal_node
+from app.graph.agents.finalization import (
+    approval_gate_node,
+    confirm_deal_node,
+    reject_deal_node,
+)
+from app.graph.agents.inquiry_agent import handle_general_inquiry_node
 from app.graph.agents.risk_worker import (
     evaluate_risk_node,
     fetch_market_data_node,
     parse_incoming_email_node,
     route_after_evaluation,
+    route_after_parse,
 )
 from app.graph.agents.supplier_agent import counter_supplier_node
 from app.logger import get_logger
@@ -56,20 +62,26 @@ def build_trade_graph(checkpointer=None):
     builder.add_node("counter_buyer", counter_buyer_node)
     builder.add_node("counter_supplier", counter_supplier_node)
     builder.add_node("reject_deal", reject_deal_node)
+    builder.add_node("handle_general_inquiry", handle_general_inquiry_node)
 
     builder.set_conditional_entry_point(
         route_entry_point,
         {"proactive_outreach": "proactive_outreach", "parse_incoming_email": "parse_incoming_email", END: END},
     )
     builder.add_edge("proactive_outreach", END)
-    builder.add_edge("parse_incoming_email", "fetch_market_data")
+    # A decline closes the deal and a price-less question is answered from the deal facts; neither is priced.
+    builder.add_conditional_edges(
+        "parse_incoming_email",
+        route_after_parse,
+        {node: node for node in ("fetch_market_data", "reject_deal", "handle_general_inquiry")},
+    )
     builder.add_edge("fetch_market_data", "evaluate_risk")
     builder.add_conditional_edges(
         "evaluate_risk",
         route_after_evaluation,
         {node: node for node in ("approval_gate", "confirm_deal", "counter_buyer", "counter_supplier", "reject_deal")},
     )
-    for terminal in ("confirm_deal", "counter_buyer", "counter_supplier", "reject_deal"):
+    for terminal in ("confirm_deal", "counter_buyer", "counter_supplier", "reject_deal", "handle_general_inquiry"):
         builder.add_edge(terminal, END)
 
     return builder.compile(checkpointer=checkpointer) if checkpointer is not None else builder.compile()

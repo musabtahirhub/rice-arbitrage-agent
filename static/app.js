@@ -1,4 +1,4 @@
-/* Dashboard controller: state, polling, routing and API calls. Rendering lives in components.js (window.UI). */
+/* Controller: view router (#landing / #admin), desk state, polling and API calls. Rendering lives in components.js (window.UI). */
 (function () {
   const POLL_MS = 5000;
   const STORE_KEY = "arb_desk_campaigns";
@@ -196,10 +196,28 @@
   $("approveBtn").addEventListener("click", () => decide(true));
   $("rejectBtn").addEventListener("click", () => decide(false));
 
+  /* ---------- view router ----------
+   * The backend only serves index.html at "/", so views live in the hash: #admin is the desk, anything else is the
+   * landing page (and #features etc. scroll to that section). An /admin path also opens the desk if it is ever served. */
+  const isAdminRoute = () => location.hash === "#admin" || /\/admin\/?$/.test(location.pathname);
+  function route() {
+    const admin = isAdminRoute();
+    const was = document.documentElement.dataset.view;
+    document.documentElement.dataset.view = admin ? "admin" : "landing";
+    document.title = admin ? "AURA X · Desk" : "AURA X";
+    const target = !admin && location.hash.length > 1 && document.getElementById(location.hash.slice(1));
+    if (target && target.closest("#landingView")) target.scrollIntoView({ behavior: was === "landing" ? "smooth" : "auto" });
+    else if (was !== document.documentElement.dataset.view) window.scrollTo(0, 0);
+    if (admin && was !== "admin") { state.lastRender = ""; refresh(); }
+  }
+  window.addEventListener("hashchange", route);
+
   /* ---------- boot ---------- */
   state.ids = store.load();
   if (window.UI3D) UI3D.init();
   render();
-  refresh();
-  setInterval(() => { if (!document.hidden) refresh(); }, POLL_MS);
+  document.documentElement.dataset.view = "";   // force route() to treat the first view as a fresh entry
+  route();
+  // Poll only while the desk is on screen; the landing page makes no API calls.
+  setInterval(() => { if (!document.hidden && isAdminRoute()) refresh(); }, POLL_MS);
 })();

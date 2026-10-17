@@ -16,6 +16,7 @@ from app.graph import workflow
 from app.logger import get_logger
 from app.models import ApprovalPayload, SimulateTurnRequest
 from app.schemas import ApproveDealResponse, NegotiateTurnResponse, model_from_state
+from app.services.mail.email_utils import rfq_subject
 from app.services.mail.gmail_client import send_reply
 from app.telemetry import build_trace_config, flush_telemetry, get_langfuse_handler
 
@@ -145,7 +146,10 @@ def _dispatch_supplier_approval_email(resumed_state: dict, db_camp: CampaignMode
         supp_msg,
         resumed_state.get("last_supplier_message_id"),
         resumed_state.get("supplier_references"),
-        f"Deal Confirmation & Volume Lock — {commodity}",
+        resumed_state.get("supplier_thread_subject") or rfq_subject(
+            db_camp.id, commodity, getattr(resumed_state.get("campaign"), "origin_port_default", "")
+            or db_camp.origin_port_default
+        ),
     )
 
 

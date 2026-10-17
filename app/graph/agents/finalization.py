@@ -8,6 +8,7 @@ from app.config import settings
 from app.logger import get_logger
 from app.models import Campaign, DealState, ParsedEmail, coerce_campaign, coerce_terms
 from app.prompts import (
+    DEAL_CLOSE_OUT_PROMPT,
     DEAL_CONFIRMATION_PROMPT,
     DEAL_REJECTION_PROMPT,
 )
@@ -192,7 +193,73 @@ def _resolve_rejected_offer_price(
     return supplier.price_usd_per_mt if supplier else 0.0
 
 
+def _close_out_draft(campaign: Campaign, recipient_declined: bool) -> tuple[str, str]:
+    subject = f"Enquiry Closed — {campaign.commodity}"
+    if recipient_declined:
+        middle = (
+            f"Thank you for letting us know. We have noted your decision on this {campaign.commodity} parcel "
+            f"and closed the enquiry on our side.\n\n"
+            f"We value the relationship and hope to work together on a future shipment."
+        )
+    else:
+        middle = (
+            f"We regret to advise that we are unable to proceed with this {campaign.commodity} parcel at this time "
+            f"and are withdrawing our offer.\n\n"
+            f"We appreciate your interest and will be in touch with fresh availability."
+        )
+    body = f"Dear Trading Partner,\n\n{middle}\n\nBest regards,\nTrading Desk, {settings.desk_name}"
+    return subject, body
+
+
+def _draft_close_out(
+    campaign: Campaign, declining_role: str, recipient_role: str, situation: str,
+    config: Optional[RunnableConfig] = None,
+) -> str:
+    prompt = DEAL_CLOSE_OUT_PROMPT.format(
+        desk_name=settings.desk_name,
+        commodity=campaign.commodity,
+        declining_party=declining_role,
+        recipient_role=recipient_role,
+        recipient_name="Trading Partner",
+        situation=situation,
+    )
+    fallback = _close_out_draft(campaign, recipient_declined=declining_role == recipient_role)
+    return generate_email_draft(prompt, *fallback, config=config)
+
+
+def _close_out_counterparty_decline(state: DealState, config: Optional[RunnableConfig] = None) -> dict:
+    """The counterparty walked away: acknowledge them, and withdraw from the other side if it was engaged
+    (the buyer holds terms, or the supplier was sent an RFQ), so nobody is left waiting."""
+    campaign = coerce_campaign(state["campaign"])
+    declining_role = state.get("active_role", "buyer")
+    reason = state.get("evaluation_reason", f"{declining_role.capitalize()} declined the deal.")
+    drafts = {declining_role: _draft_close_out(campaign, declining_role, declining_role, reason, config=config)}
+
+    other_role = "supplier" if declining_role == "buyer" else "buyer"
+    other_engaged = (
+        bool(state.get("buyer_terms")) if other_role == "buyer"
+        else bool(state.get("supplier_terms") or state.get("target_fob_ceiling"))
+    )
+    if other_engaged:
+        drafts[other_role] = _draft_close_out(campaign, declining_role, other_role, reason, config=config)
+
+    logger.warning(
+        f"[WORKFLOW:Node 4D Reject] {declining_role.capitalize()} declined; closing deal "
+        f"(close-out to: {', '.join(drafts)}). Reason: '{reason}'"
+    )
+    update = RejectDealUpdate(
+        deal_status="rejected",
+        is_deal_viable=False,
+        action="REJECT_HARD",
+        buyer_draft=drafts.get("buyer"),
+        supplier_draft=drafts.get("supplier"),
+    )
+    return update.model_dump(exclude_none=True)
+
+
 def reject_deal_node(state: DealState, config: Optional[RunnableConfig] = None) -> dict:
+    if state.get("inbound_intent") == "REJECTION":
+        return _close_out_counterparty_decline(state, config=config)
     campaign = coerce_campaign(state["campaign"])
     reason = state.get("evaluation_reason", "Spread does not satisfy minimum hard hurdle.")
     active_role = state.get("active_role", "buyer")

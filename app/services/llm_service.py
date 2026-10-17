@@ -145,6 +145,24 @@ _ACCEPTANCE_RE = re.compile(
 )
 
 
+_STANDALONE_ACCEPTANCE_RE = re.compile(
+    r"^\W*(?:ok(?:ay)?[\s,.!]*)?(?:confirmed|go\s+ahead|deal(?:\s+done)?|proceed)\b",
+    re.IGNORECASE,
+)
+
+
+# Checked before acceptance: "we cannot accept" / "not interested" is a walk-away, not a counter.
+_DECLINE_RE = re.compile(
+    r"\bnot\s+interested\b"
+    r"|\b(?:we|i)\s+(?:must\s+|have\s+to\s+|will\s+)?(?:respectfully\s+|regretfully\s+)?decline\b"
+    r"|\b(?:cannot|can't|can\s+not|unable\s+to)\s+(?:supply|offer|fulfil+|proceed|participate)\b"
+    r"|\b(?:we|i)(?:'ll|\s+will)\s+pass\b|\bpass\s+on\s+this\b"
+    r"|\bno\s+longer\s+(?:interested|available|require|need)"
+    r"|\bwithdraw\s+(?:our|my|the)\s+(?:offer|bid|interest)\b",
+    re.IGNORECASE,
+)
+
+
 _NEGATED_ACCEPTANCE_RE = re.compile(
     r"\b(?:not|cannot|can't|unable\s+to|won't|will\s+not|do\s+not|don't)\s+(?:\w+\s+){0,2}(?:accept|agree|proceed|confirm)",
     re.IGNORECASE,
@@ -157,7 +175,9 @@ _PRICE_AFTER_CURRENCY_RE = re.compile(r"(?:USD|US\$|\$)\s*([\d,]+(?:\.\d+)?)", r
 _PRICE_BEFORE_UNIT_RE = re.compile(r"([\d,]+(?:\.\d+)?)\s*(?:USD|US\$|\$|per\s*MT|/\s*MT)", re.IGNORECASE)
 
 
-_QUANTITY_RE = re.compile(r"(\d[\d,]*)\s*(?:MT|metric\s*ton)", re.IGNORECASE)
+_QUANTITY_RE = re.compile(
+    r"(?<![\d.,])(\d[\d,]*(?:\.\d+)?)\s*(?:MTs?\b|metric\s+ton(?:ne)?s?\b|ton(?:ne)?s\b)", re.IGNORECASE
+)
 
 
 _KNOWN_PORTS = ("Jebel Ali", "Dammam", "Karachi", "Mundra", "Bangkok")
@@ -169,7 +189,20 @@ def _extract_price(raw_text: str) -> float:
 
 
 def _is_explicit_acceptance(raw_text: str) -> bool:
-    return bool(_ACCEPTANCE_RE.search(raw_text)) and not _NEGATED_ACCEPTANCE_RE.search(raw_text)
+    accepted = _ACCEPTANCE_RE.search(raw_text) or _STANDALONE_ACCEPTANCE_RE.search(raw_text.strip())
+    return bool(accepted) and not _NEGATED_ACCEPTANCE_RE.search(raw_text)
+
+
+def _is_decline(raw_text: str) -> bool:
+    return bool(_DECLINE_RE.search(raw_text))
+
+
+def _regex_intent(raw_text: str, price: float) -> str:
+    if _is_decline(raw_text):
+        return "REJECTION"
+    if _is_explicit_acceptance(raw_text):
+        return "ACCEPTANCE"
+    return "COUNTER_OFFER" if price > 0 else "INQUIRY"
 
 
 def _extract_quantity(raw_text: str, default_volume_mt: float) -> float:
@@ -201,8 +234,8 @@ def extract_terms_with_regex(
     default_volume_mt: float,
 ) -> ParsedEmail:
     price = _extract_price(raw_text)
-    is_acceptance = _is_explicit_acceptance(raw_text)
-    intent = "ACCEPTANCE" if is_acceptance else ("COUNTER_OFFER" if price > 0 else "INQUIRY")
+    intent = _regex_intent(raw_text, price)
+    is_acceptance = intent == "ACCEPTANCE"
     if price <= 0.0 and is_acceptance:
         price = last_proposed_price
 
@@ -229,11 +262,90 @@ def extract_terms_with_regex(
 DEFAULT_PROPOSED_PRICE = 1111.0
 
 
-def _parse_terms_json(text: str, role: str) -> ParsedEmail:
-    data = json.loads(text.strip().removeprefix("```json").removesuffix("```").strip())
-    if isinstance(data, dict):
-        data.setdefault("sender_role", role)
+INTENTS = ("ACCEPTANCE", "COUNTER_OFFER", "REJECTION", "INQUIRY")
+
+
+# A counter quoted further than this from the desk's own rate is not a per-MT price for this parcel
+# (a discount amount, a freight figure, a typo); treat the email as price-less instead.
+_PLAUSIBLE_PRICE_RATIO = (0.5, 2.0)
+
+
+# An acceptance that names a price this far from the desk's rate is really a counter-offer.
+_ACCEPTANCE_PRICE_TOLERANCE_USD = 1.0
+
+
+_JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
+
+
+def _to_number(value: Any) -> Optional[float]:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    if isinstance(value, str):
+        match = re.search(r"\d[\d,]*(?:\.\d+)?", value)
+        return float(match.group(0).replace(",", "")) if match else None
+    return None
+
+
+def _parse_terms_json(text: str, role: str, default_volume_mt: Optional[float] = None) -> ParsedEmail:
+    """ParsedEmail from a Gemini response: tolerates fences or prose around the JSON, nulls, and
+    numbers written as strings ("1,050", "USD 1050")."""
+    match = _JSON_OBJECT_RE.search(text)
+    data = json.loads(match.group(0) if match else text)
+    if not isinstance(data, dict):
+        raise ValueError("extraction response is not a JSON object")
+    data = {key: value for key, value in data.items() if value is not None}
+    data["sender_role"] = role
+
+    price = _to_number(data.get("price_usd_per_mt"))
+    data["price_usd_per_mt"] = max(price or 0.0, 0.0)
+    quantity = _to_number(data.get("quantity_mt"))
+    if quantity and quantity > 0:
+        data["quantity_mt"] = quantity
+    elif default_volume_mt:
+        data["quantity_mt"] = default_volume_mt
+    else:
+        data.pop("quantity_mt", None)
+
+    intent = str(data.get("intent", "")).strip().upper().replace(" ", "_")
+    if intent not in INTENTS:
+        intent = "ACCEPTANCE" if data.get("is_acceptance") is True else (
+            "COUNTER_OFFER" if data["price_usd_per_mt"] > 0 else "INQUIRY"
+        )
+    data["intent"] = intent
     return ParsedEmail(**data)
+
+
+def reconcile_intent(parsed: ParsedEmail, last_proposed_price: float) -> ParsedEmail:
+    """Deterministic checks on extracted terms, from the LLM or the regex parser alike:
+    - ``is_acceptance`` always agrees with ``intent``;
+    - a bare acceptance takes the desk's last rate; one naming a different price is a counter-offer;
+    - a counter priced implausibly far from the desk's rate is treated as price-less (an inquiry);
+    - declines and inquiries carry no price.
+    """
+    intent = (parsed.intent or "").upper()
+    price = parsed.price_usd_per_mt
+    if intent == "ACCEPTANCE" or (parsed.is_acceptance and intent not in ("REJECTION", "INQUIRY")):
+        if price <= 0.0:
+            price = last_proposed_price
+        intent = "ACCEPTANCE"
+        if last_proposed_price > 0 and abs(price - last_proposed_price) > _ACCEPTANCE_PRICE_TOLERANCE_USD:
+            intent = "COUNTER_OFFER"
+    elif intent == "COUNTER_OFFER" or (intent not in INTENTS and price > 0):
+        intent = "COUNTER_OFFER"
+        low, high = (ratio * last_proposed_price for ratio in _PLAUSIBLE_PRICE_RATIO)
+        if price <= 0.0 or (last_proposed_price > 0 and not low <= price <= high):
+            if price > 0.0:
+                logger.warning(
+                    f"[PARSER] Quoted ${price:.2f}/MT is implausible against the desk's ${last_proposed_price:.2f}/MT; "
+                    f"treating the {parsed.sender_role} email as a question with no price."
+                )
+            intent, price = "INQUIRY", 0.0
+    else:
+        intent = intent if intent in ("REJECTION", "INQUIRY") else "INQUIRY"
+        price = 0.0
+    return parsed.model_copy(
+        update={"intent": intent, "is_acceptance": intent == "ACCEPTANCE", "price_usd_per_mt": price}
+    )
 
 
 def extract_terms_with_llm(
@@ -255,7 +367,7 @@ def extract_terms_with_llm(
     )
     for text in iter_gemini_responses(prompt, config):
         try:
-            parsed = _parse_terms_json(text, role)
+            parsed = _parse_terms_json(text, role, default_volume_mt)
         except Exception as exc:
             logger.warning(f"[LLM PARSER] Unusable extraction response ({exc.__class__.__name__}: {exc}).")
             continue
@@ -284,6 +396,11 @@ def extract_email_terms(
     llm_result = extract_terms_with_llm(
         raw_text, role, last_proposed_price, commodity, default_volume_mt, config=config or ctx.get("config")
     )
-    if llm_result is not None:
-        return llm_result
-    return extract_terms_with_regex(raw_text, role, last_proposed_price, commodity, default_volume_mt)
+    parsed = llm_result or extract_terms_with_regex(raw_text, role, last_proposed_price, commodity, default_volume_mt)
+    reconciled = reconcile_intent(parsed, last_proposed_price)
+    if (reconciled.intent, reconciled.price_usd_per_mt) != (parsed.intent, parsed.price_usd_per_mt):
+        logger.info(
+            f"[PARSER] Reconciled {role} terms: intent '{parsed.intent}' -> '{reconciled.intent}', "
+            f"price ${parsed.price_usd_per_mt:.2f} -> ${reconciled.price_usd_per_mt:.2f}/MT"
+        )
+    return reconciled

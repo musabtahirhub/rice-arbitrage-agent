@@ -195,8 +195,12 @@ def _collect_text_parts(parts: list[dict], plain_parts: list[str], html_parts: l
 
 
 def html_to_text(html_content: str) -> str:
+    """Visible text of an HTML body, without the quoted thread (Gmail's .gmail_quote, <blockquote>)."""
     try:
-        return BeautifulSoup(html_content, "html.parser").get_text()
+        soup = BeautifulSoup(html_content, "html.parser")
+        for quoted in soup.select(".gmail_quote, blockquote"):
+            quoted.decompose()
+        return soup.get_text("\n")
     except Exception:
         return html_content
 

@@ -44,6 +44,9 @@ services:
       - .env
     environment:
       - DATABASE_URL=postgresql://${POSTGRES_USER:-arbitrage_user}:${POSTGRES_PASSWORD:-arbitrage_secret_pass}@postgres:5432/${POSTGRES_DB:-rice_arbitrage}
+      # The image runs 2 uvicorn workers: graph state must live in Postgres so every worker
+      # (UI requests, Gmail webhooks) sees the same negotiation. In-memory state is per-process.
+      - CHECKPOINTER_BACKEND=postgres
       - CORS_ORIGINS=["*"]
     volumes:
       # Persist local scrapers cache and token storage

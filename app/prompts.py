@@ -15,7 +15,7 @@ Output a single valid JSON object matching this exact schema:
   "is_acceptance": true or false,
   "commodity": "<commodity name>",
   "quantity_mt": <number in metric tons>,
-  "price_usd_per_mt": <numeric unit price in USD per MT>,
+  "price_usd_per_mt": <numeric unit price in USD per MT, or null>,
   "incoterm": "CIF" or "FOB",
   "port": "<port name>",
   "payment_terms": "<e.g. 100% LC at sight, CAD>",
@@ -28,15 +28,21 @@ Rules:
    - Set "intent": "ACCEPTANCE"
    - Set "is_acceptance": true
    - Set "price_usd_per_mt": {last_proposed_price:.2f}
-3. If the counterparty proposes a counter-bid, adjustment, or different price:
+3. If the counterparty proposes a counter-bid, adjustment, or different price (including "we accept, but at USD X"):
    - Set "intent": "COUNTER_OFFER"
    - Set "is_acceptance": false
-   - Extract their quoted price into "price_usd_per_mt".
-4. If the counterparty declines, rejects, or walks away:
+   - Extract their quoted per-MT unit price into "price_usd_per_mt" (not a discount amount, freight, or total value).
+4. If the counterparty declines, rejects, cannot supply, or walks away:
    - Set "intent": "REJECTION"
    - Set "is_acceptance": false
-5. If incoterm is unspecified: assume 'CIF' for buyers and 'FOB' for suppliers.
-6. If quantity is unspecified: default to {default_volume_mt:,.0f} MT.
+   - Set "price_usd_per_mt": null
+5. If the counterparty only asks a question or requests information, without accepting, declining, or naming a price:
+   - Set "intent": "INQUIRY"
+   - Set "is_acceptance": false
+   - Set "price_usd_per_mt": null
+6. If incoterm is unspecified: assume 'CIF' for buyers and 'FOB' for suppliers.
+7. If quantity is unspecified: default to {default_volume_mt:,.0f} MT.
+8. Read only the counterparty's new message. Ignore quoted earlier emails, signatures, and disclaimers.
 
 Incoming Email:
 \"\"\"
@@ -95,6 +101,27 @@ BODY:
 <dynamic email body>
 """
 
+BUYER_HOLDING_PROMPT = """\
+You are a principal physical commodity arbitrage trader representing {desk_name}.
+The buyer ({buyer_name}) has accepted our offer. Compose a short acknowledgement email.
+
+Commercial Context:
+- Commodity: {commodity}
+- Volume: {quantity_mt:,.0f} MT
+- Accepted Rate: USD {accepted_cif:.2f}/MT CIF {destination_port}
+
+Instructions:
+- Thank them and confirm we have noted their acceptance at USD {accepted_cif:.2f}/MT CIF {destination_port}.
+- Explain that we are securing the physical allocation with our mill and will send the formal contract confirmation shortly.
+- Do NOT propose a new price, counter, or ask them to re-confirm. This is not yet a binding confirmation.
+- Sign off from "Trading Desk, {desk_name}".
+
+STRICT OUTPUT FORMAT:
+SUBJECT: <dynamic subject line>
+BODY:
+<dynamic email body>
+"""
+
 SUPPLIER_RFQ_PROMPT = """\
 You are an experienced international commodity procurement director representing {desk_name}.
 Compose a structured, assertive Request for Quotation (RFQ) or counter-bid to an agricultural rice exporter / mill ({supplier_name}) at {origin_port}.
@@ -139,6 +166,60 @@ Instructions:
   - Confirm acceptance of their CIF purchase order, state that export mill allocation is formally secured, and notify them that our contract department is issuing the formal Soft Corporate Offer / Sales Contract along with draft Letter of Credit (LC) instructions.
 - Tone must be authoritative, celebratory, and rigorous.
 - Sign off from "{desk_name}".
+
+STRICT OUTPUT FORMAT:
+SUBJECT: <dynamic subject line>
+BODY:
+<dynamic email body>
+"""
+
+GENERAL_INQUIRY_PROMPT = """\
+You are a seasoned physical commodity trader at {desk_name}, replying to a {recipient_role} who asked a question \
+during a live {commodity} negotiation.
+
+Their message:
+\"\"\"
+{question}
+\"\"\"
+
+Deal facts (the ONLY facts you may state):
+- Commodity: {commodity}, max {broken_percentage}% broken grain
+- Volume: {volume_mt:,.0f} MT
+- Incoterm: {incoterm}
+- Port of Loading: {origin_port}
+- Port of Discharge: {destination_port}
+- Payment Terms: {payment_terms}
+- Packing: {packing_spec}
+- Shipment: {shipment_window}
+- Inspection: {inspection}
+- Our current offer: USD {standing_price:.2f}/MT {incoterm} {price_port}
+
+Instructions:
+- Answer their specific question directly, warmly and professionally, using only the deal facts above.
+- If they ask about something not covered by the facts, say you will confirm it with operations and revert shortly. \
+Never invent dates, certificates, specs, or terms.
+- Do not change, discount, or renegotiate the price or any term. Do not accept or reject anything.
+- End with one gentle sentence restating our current offer of USD {standing_price:.2f}/MT {incoterm} {price_port} \
+and inviting them to confirm.
+- Keep it to a short email. Sign off from "Trading Desk, {desk_name}".
+
+STRICT OUTPUT FORMAT:
+SUBJECT: <dynamic subject line>
+BODY:
+<dynamic email body>
+"""
+
+DEAL_CLOSE_OUT_PROMPT = """\
+You are a senior trader at {desk_name}.
+A {commodity} negotiation has ended because the {declining_party} declined. Compose a short, courteous close-out email to the {recipient_role} ({recipient_name}).
+
+Situation: {situation}
+
+Instructions:
+- If the recipient is the party who declined: thank them, acknowledge their decision without arguing or countering, and keep the door open for future business.
+- If the recipient is the other party: explain politely that we are unable to proceed with this parcel at this time and withdraw our offer/enquiry, without blaming or naming the other counterparty.
+- Do not quote prices or propose new terms.
+- Sign off from "Trading Desk, {desk_name}".
 
 STRICT OUTPUT FORMAT:
 SUBJECT: <dynamic subject line>

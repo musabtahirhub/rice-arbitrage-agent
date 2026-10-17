@@ -92,4 +92,6 @@ def counter_supplier_node(state: DealState, config: Optional[RunnableConfig] = N
         f"[WORKFLOW:Node 4C Counter Supplier] Round {curr_round}: Action='{action}', "
         f"countering supplier with target FOB ceiling USD {target_ceiling:.2f}/MT"
     )
-    return CounterSupplierUpdate(deal_status="counter_sent", supplier_draft=supplier_msg).model_dump()
+    return CounterSupplierUpdate(
+        deal_status="counter_sent", supplier_draft=supplier_msg, last_counter_fob_usd=target_ceiling
+    ).model_dump()
