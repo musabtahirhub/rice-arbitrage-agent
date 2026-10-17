@@ -10,8 +10,9 @@
   <link rel="stylesheet" href="/static/styles.css" />
 </head>
 <body class="min-h-screen">
+  <canvas id="bgCanvas" aria-hidden="true"></canvas>
   <!-- Top bar -->
-  <header class="border-b border-[#1f2733] bg-[#0a0e14] sticky top-0 z-40">
+  <header class="app-header sticky top-0 z-40">
     <div class="max-w-[1600px] mx-auto px-4 py-2.5 flex items-center justify-between gap-3">
       <div class="flex items-center gap-2.5 min-w-0">
         <i data-lucide="wheat" class="w-5 h-5 text-emerald-400 shrink-0"></i>
@@ -29,12 +30,31 @@
   </header>
 
   <main class="max-w-[1600px] mx-auto px-4 py-3 space-y-3">
+    <!-- Oversized hero type over the 3D landscape -->
+    <div class="hero" aria-hidden="true">
+      <p class="hero-title">ARBITRAGE<span class="hero-x">&times;</span>DESK</p>
+      <div class="hero-side"><span>Sourcing</span><span>Pricing</span><span>Risk</span><span>Approval</span></div>
+    </div>
+
     <!-- KPI metric bar -->
     <section id="metricBar" aria-label="Desk metrics" class="panel grid grid-cols-2 lg:grid-cols-4">
-      <div class="kpi"><div class="kpi-label">Active deals</div><div id="kpiActive" class="kpi-value">–</div><div class="kpi-sub">in negotiation</div></div>
-      <div class="kpi"><div class="kpi-label">Locked volume</div><div id="kpiVolume" class="kpi-value">–</div><div class="kpi-sub">MT closed</div></div>
-      <div class="kpi"><div class="kpi-label">Avg net margin</div><div id="kpiMargin" class="kpi-value">–</div><div class="kpi-sub">live &amp; closed deals</div></div>
-      <div class="kpi"><div class="kpi-label">Pending approvals</div><div id="kpiPending" class="kpi-value">–</div><div class="kpi-sub">awaiting human review</div></div>
+      <div class="kpi tilt"><div class="kpi-label">Active deals</div><div id="kpiActive" class="kpi-value">–</div><div class="kpi-sub">in negotiation</div></div>
+      <div class="kpi tilt"><div class="kpi-label">Locked volume</div><div id="kpiVolume" class="kpi-value">–</div><div class="kpi-sub">MT closed</div></div>
+      <div class="kpi tilt"><div class="kpi-label">Avg net margin</div><div id="kpiMargin" class="kpi-value">–</div><div class="kpi-sub">live &amp; closed deals</div></div>
+      <div class="kpi tilt"><div class="kpi-label">Pending approvals</div><div id="kpiPending" class="kpi-value">–</div><div class="kpi-sub">awaiting human review</div></div>
+    </section>
+
+    <!-- 3D visualizers -->
+    <section class="stage-3d" aria-label="3D visualizers">
+      <div class="panel relative overflow-hidden">
+        <div class="panel-head"><span class="panel-title">Trade routes</span><span id="globeLegend" class="text-[10px] text-slate-500">drag to rotate</span></div>
+        <div id="globeBox" class="viz-box"></div>
+      </div>
+      <div class="panel relative overflow-hidden">
+        <div class="panel-head"><span class="panel-title">Margin cube</span><span id="cubeCampaign" class="text-[10px] text-slate-500 mono">–</span></div>
+        <div id="cubeBox" class="viz-box"></div>
+        <div id="cubeReadout" class="cube-readout"></div>
+      </div>
     </section>
 
     <div class="workspace">
@@ -114,6 +134,7 @@
 
   <div id="toasts"></div>
 
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
   <script src="/static/components.js"></script>
   <script src="/static/app.js"></script>
 </body>

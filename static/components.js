@@ -55,7 +55,7 @@
 
   /* ---- Pricing cards ---- */
   function priceCard(label, value, hint, accent) {
-    return `<div class="price-card${accent ? " accent-" + accent : ""}"><div class="label">${esc(label)}</div><div class="value">${value}</div>${hint ? `<div class="hint">${esc(hint)}</div>` : ""}</div>`;
+    return `<div class="price-card tilt${accent ? " accent-" + accent : ""}"><div class="label">${esc(label)}</div><div class="value">${value}</div>${hint ? `<div class="hint">${esc(hint)}</div>` : ""}</div>`;
   }
 
   function spreadGauge(c) {
@@ -160,7 +160,7 @@
   }
   function approvalSummary(c) {
     const vol = c.buyer_terms?.quantity_mt, bid = c.buyer_terms?.price_usd_per_mt, ask = c.supplier_terms?.price_usd_per_mt;
-    const row = (k, v) => `<div class="flex justify-between py-1.5 border-b border-[#1f2733] text-xs"><span class="text-slate-400">${k}</span><span class="mono">${v}</span></div>`;
+    const row = (k, v) => `<div class="flex justify-between py-1.5 border-b border-[var(--line)] text-xs"><span class="text-slate-400">${k}</span><span class="mono">${v}</span></div>`;
     return `<div class="price-card accent-amber">${row("Campaign", esc(c.campaign_id))}${row("Commodity", esc(c.commodity))}${row("Volume", num(vol) ? vol.toLocaleString() + " MT" : "–")}
       ${row("Buyer bid CIF", usd(bid))}${row("Supplier ask FOB", usd(ask))}${row("Freight", usd(c.freight_cost_usd))}${row("Net spread", usd(c.net_spread_usd) + "/MT")}${row("Net margin", pct(c.net_margin_pct))}
       ${num(vol) && num(c.net_spread_usd) !== null ? row("Total profit", usd(vol * c.net_spread_usd, 0)) : ""}</div>`;
@@ -196,4 +196,277 @@
   }
 
   window.UI = { esc, usd, pct, statusInfo, statusBadge, marginTone, campaignRow, inspector, emptyInspector, emptyFeed, approvalSummary };
+})();
+
+/* ---------------------------------------------------------------------------
+ * 3D layer (Three.js r128): dark-studio grain backdrop, trade-route globe, margin cube, tilt-on-hover cards.
+ * Everything degrades to a no-op when THREE / WebGL is unavailable.
+ * ------------------------------------------------------------------------- */
+(function () {
+  const INK = 0x2A2723, TAUPE = 0x8a7f70, GOLD = 0xD4A359, FLUID = 0xE5B842, EMERALD = 0x2E7D32;
+  // Readout colours (need to read on dark glass) and cube fluid tints per margin tone
+  const TONE = { green: 0x2E7D32, amber: 0xA96F08, red: 0xbf4d3c, blue: TAUPE, gray: TAUPE };
+  const TINT = { green: FLUID, amber: FLUID, red: 0xc9743a, blue: FLUID, gray: FLUID };   // warm gold fluid; rust below the floor
+  const PORTS = {
+    "Karachi": [24.86, 67.0, "origin"], "Mundra": [22.84, 69.7, "origin"],
+    "Laem Chabang": [13.08, 100.88, "origin"], "Cat Lai": [10.77, 106.77, "origin"],
+    "Jebel Ali": [25.0, 55.06, "dest"], "Dammam": [26.43, 50.1, "dest"],
+  };
+  const views = [];   // { renderer, scene, camera, el, visible, tick(t, dt) }
+  let globe = null, cube = null;
+
+  function makeView(el, fov, camZ) {
+    if (!window.THREE) { el.innerHTML = '<div class="viz-fallback">3D view unavailable (Three.js failed to load).</div>'; return null; }
+    let renderer;
+    try { renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true }); }
+    catch (e) { el.innerHTML = '<div class="viz-fallback">3D view unavailable (WebGL is disabled in this browser).</div>'; return null; }
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    el.appendChild(renderer.domElement);
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(fov, 1, 0.1, 100);
+    camera.position.set(0, 0, camZ);
+    const v = { renderer, scene, camera, el, visible: true, tick() {} };
+    const resize = () => {
+      const w = el.clientWidth || 1, h = el.clientHeight || 1;
+      renderer.setSize(w, h, false); camera.aspect = w / h; camera.updateProjectionMatrix();
+    };
+    if (window.ResizeObserver) new ResizeObserver(resize).observe(el); else window.addEventListener("resize", resize);
+    if (window.IntersectionObserver) new IntersectionObserver((es) => { v.visible = es[0].isIntersecting; }).observe(el);
+    resize();
+    views.push(v);
+    return v;
+  }
+
+  /* Pointer drag -> rotation offset on a group. */
+  function draggable(el, onDrag) {
+    let last = null;
+    el.addEventListener("pointerdown", (e) => { last = e; if (el.setPointerCapture) el.setPointerCapture(e.pointerId); });
+    el.addEventListener("pointermove", (e) => { if (last) { onDrag(e.clientX - last.clientX, e.clientY - last.clientY); last = e; } });
+    const end = () => { last = null; };
+    el.addEventListener("pointerup", end); el.addEventListener("pointercancel", end);
+  }
+
+  const ll = (lat, lon, r) => {
+    const phi = (90 - lat) * Math.PI / 180, th = (lon + 180) * Math.PI / 180;
+    return new THREE.Vector3(-r * Math.sin(phi) * Math.cos(th), r * Math.cos(phi), r * Math.sin(phi) * Math.sin(th));
+  };
+
+  /* ---------------- Globe ---------------- */
+  function initGlobe(el) {
+    const v = makeView(el, 40, 4.3); if (!v) return;
+    const R = 1.5, group = new THREE.Group(); v.scene.add(group);
+    v.scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+    const sun = new THREE.DirectionalLight(0xfff0dc, 0.9); sun.position.set(3, 3, 4); v.scene.add(sun);
+    // Frosted white-glass body, white/taupe wire graticule, faint gold halo
+    group.add(new THREE.Mesh(new THREE.SphereGeometry(R * 0.995, 48, 32), new THREE.MeshPhongMaterial({ color: 0xf6f1e8, specular: 0xffffff, shininess: 90, transparent: true, opacity: 0.66 })));
+    group.add(new THREE.Mesh(new THREE.SphereGeometry(R, 24, 16), new THREE.MeshBasicMaterial({ color: 0x8f8068, wireframe: true, transparent: true, opacity: 0.4 })));
+    v.scene.add(new THREE.Mesh(new THREE.SphereGeometry(R * 1.07, 32, 24), new THREE.MeshBasicMaterial({ color: 0xffd9a0, transparent: true, opacity: 0.18, side: THREE.BackSide })));
+    Object.values(PORTS).forEach(([lat, lon, kind]) => {
+      const m = new THREE.Mesh(new THREE.SphereGeometry(kind === "dest" ? 0.05 : 0.038, 12, 12), new THREE.MeshBasicMaterial({ color: kind === "dest" ? GOLD : INK }));
+      m.position.copy(ll(lat, lon, R)); group.add(m);
+    });
+    const routes = new THREE.Group(); group.add(routes);
+    const g = { v, group, routes, arcs: [], key: "", spin: 0.1, drag: 0 };
+    // Face the Arabian Sea / Indian subcontinent first.
+    const p = ll(24, 62, 1); group.rotation.y = -Math.atan2(p.x, p.z); group.rotation.x = 0.35;
+    draggable(el, (dx, dy) => { group.rotation.y += dx * 0.008; group.rotation.x = Math.max(-1, Math.min(1, group.rotation.x + dy * 0.006)); g.drag = 1.5; });
+    v.tick = (t, dt) => {
+      g.drag = Math.max(0, g.drag - dt);
+      if (!g.drag) group.rotation.y += g.spin * dt;
+      g.arcs.forEach((a) => { a.dot.position.copy(a.curve.getPoint(((t * a.speed) + a.offset) % 1)); });
+    };
+    globe = g;
+  }
+
+  function originOf(c) {
+    const n = String(c.commodity || "").toLowerCase();
+    if (/thai|jasmine/.test(n)) return "Laem Chabang";
+    if (/viet/.test(n)) return "Cat Lai";
+    return "Karachi";
+  }
+  function destOf(c) { return /dammam|saudi/i.test((c.buyer_terms && c.buyer_terms.port) || c.destination_port || "") ? "Dammam" : "Jebel Ali"; }
+
+  function updateGlobe(list, selected) {
+    if (!globe) return;
+    const live = list.filter((c) => c.deal_status !== "rejected" && c.deal_status !== "supplier_lock_failed");
+    const specs = live.map((c) => ({ o: originOf(c), d: destOf(c), sel: c.campaign_id === selected }));
+    const key = JSON.stringify(specs);
+    if (key === globe.key) return;
+    globe.key = key;
+    const R = 1.5;
+    globe.arcs.forEach((a) => { a.line.geometry.dispose(); a.line.material.dispose(); a.dot.geometry.dispose(); a.dot.material.dispose(); });
+    globe.routes.clear(); globe.arcs = [];
+    specs.forEach((s, i) => {
+      const a = ll(PORTS[s.o][0], PORTS[s.o][1], R), b = ll(PORTS[s.d][0], PORTS[s.d][1], R);
+      const mid = a.clone().add(b).multiplyScalar(0.5).normalize().multiplyScalar(R * (1.3 + a.distanceTo(b) * 0.25));
+      const curve = new THREE.QuadraticBezierCurve3(a, mid, b);
+            const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints(curve.getPoints(48)),
+        new THREE.LineBasicMaterial({ color: s.sel ? GOLD : INK, transparent: true, opacity: s.sel ? 1 : 0.55 }));
+      const dot = new THREE.Mesh(new THREE.SphereGeometry(s.sel ? 0.06 : 0.04, 10, 10), new THREE.MeshBasicMaterial({ color: s.sel ? 0xfff0c8 : 0xe9dcc0 }));
+      globe.routes.add(line, dot);
+      globe.arcs.push({ curve, line, dot, speed: 0.12 + (i % 3) * 0.03, offset: (i * 0.37) % 1 });
+    });
+    const legend = document.getElementById("globeLegend");
+    if (legend) legend.textContent = (specs.length ? specs.length + " active route" + (specs.length > 1 ? "s" : "") : "no active routes") + " · drag to rotate";
+  }
+
+  /* ---------------- Margin cube ---------------- */
+  function initCube(el) {
+    const v = makeView(el, 38, 7); if (!v) return;
+    v.scene.add(new THREE.AmbientLight(0xffffff, 0.55));
+    const light = new THREE.DirectionalLight(0xfff0dc, 1.0); light.position.set(4, 6, 6); v.scene.add(light);
+    const group = new THREE.Group(); v.scene.add(group);
+    group.rotation.x = 0.28;
+    const grid = new THREE.GridHelper(5, 10, 0xb39a6a, 0xd8cfc0); grid.position.y = -1.5; group.add(grid);
+    // Translucent glass block, warm gold fluid level, green floor boundary
+    const glass = new THREE.Mesh(new THREE.BoxGeometry(1.7, 3.6, 1.7), new THREE.MeshPhongMaterial({ color: 0xffffff, specular: 0xffffff, shininess: 140, transparent: true, opacity: 0.35, depthWrite: false }));
+    glass.position.y = -1.5 + 1.8; group.add(glass);
+    const frame = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(1.7, 3.6, 1.7)), new THREE.LineBasicMaterial({ color: GOLD, transparent: true, opacity: 0.6 }));
+    frame.position.y = -1.5 + 1.8; group.add(frame);
+    const mat = new THREE.MeshPhongMaterial({ color: TINT.gray, emissive: TINT.gray, emissiveIntensity: 0.3, specular: 0xffffff, shininess: 120, transparent: true, opacity: 0.8 });
+    const bar = new THREE.Mesh(new THREE.BoxGeometry(1.4, 1, 1.4), mat); group.add(bar);
+    bar.add(new THREE.LineSegments(new THREE.EdgesGeometry(bar.geometry), new THREE.LineBasicMaterial({ color: 0x9a6d12 })));
+    const mk = (color) => { const m = new THREE.Mesh(new THREE.BoxGeometry(2.2, 0.02, 2.2), new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.5 })); group.add(m); return m; };
+    const c = { v, group, bar, mat, hardPlane: mk(EMERALD), softPlane: mk(GOLD), h: 0.05, target: 0.05, drag: 0 };
+    draggable(el, (dx) => { group.rotation.y += dx * 0.01; c.drag = 1.5; });
+    v.tick = (t, dt) => {
+      c.h += (c.target - c.h) * Math.min(1, dt * 4);
+      bar.scale.y = Math.max(c.h, 0.02);
+      bar.position.y = -1.5 + c.h / 2;
+      group.position.y = Math.sin(t * 1.2) * 0.08;
+      c.drag = Math.max(0, c.drag - dt);
+      if (!c.drag) group.rotation.y += dt * 0.25;
+    };
+    cube = c;
+  }
+
+  function updateCube(c) {
+    const readout = document.getElementById("cubeReadout"), label = document.getElementById("cubeCampaign");
+    const U = window.UI;
+    if (!c) {
+      if (label) label.textContent = "–";
+      if (readout) readout.innerHTML = '<div class="sub">Select a campaign</div>';
+      if (cube) cube.target = 0.05;
+      return;
+    }
+    const spread = typeof c.net_spread_usd === "number" ? c.net_spread_usd : 0;
+    const hard = c.min_profit_per_mt_hard || 0, soft = c.min_profit_per_mt_soft || 0;
+    const tone = U.marginTone(c), hex = TONE[tone];
+    if (label) label.textContent = c.campaign_id;
+    if (readout) readout.innerHTML = `<div class="big" style="color:#${hex.toString(16).padStart(6, "0")}">${U.usd(spread)}<span class="sub">/MT</span></div><div class="sub">margin ${U.pct(c.net_margin_pct)} · floor ${U.usd(hard, 0)} · target ${U.usd(soft, 0)}</div>`;
+    if (!cube) return;
+    const max = Math.max(soft * 1.4, spread * 1.1, 1), H = 3.6;   // full scale = 3.6 units tall
+    cube.target = Math.max(0.05, Math.min(1.3, spread / max) * H);
+    cube.mat.color.setHex(TINT[tone]); cube.mat.emissive.setHex(TINT[tone]);
+    cube.hardPlane.position.y = -1.5 + (hard / max) * H;
+    cube.softPlane.position.y = -1.5 + (soft / max) * H;
+  }
+
+  /* ---------------- Tilt cards ---------------- */
+  function initTilt() {
+    if (window.matchMedia && (matchMedia("(prefers-reduced-motion: reduce)").matches || matchMedia("(hover: none)").matches)) return;
+    let active = null;
+    const reset = (el) => { if (el) { el.style.setProperty("--rx", "0deg"); el.style.setProperty("--ry", "0deg"); el.classList.remove("tilting"); } };
+    document.addEventListener("pointermove", (e) => {
+      const el = e.target.closest && e.target.closest(".tilt");
+      if (active && active !== el) reset(active);
+      active = el;
+      if (!el) return;
+      const r = el.getBoundingClientRect();
+      const px = (e.clientX - r.left) / r.width - 0.5, py = (e.clientY - r.top) / r.height - 0.5;
+      el.style.setProperty("--ry", (px * 10).toFixed(2) + "deg");
+      el.style.setProperty("--rx", (-py * 10).toFixed(2) + "deg");
+      el.style.setProperty("--gx", ((px + 0.5) * 100).toFixed(1) + "%");
+      el.style.setProperty("--gy", ((py + 0.5) * 100).toFixed(1) + "%");
+      el.classList.add("tilting");
+    });
+    document.addEventListener("pointerleave", () => reset(active));
+  }
+
+  /* ---------------- Sandstone backdrop ----------------
+   * Transparent canvas over the CSS ivory gradient: a sparse cloud of thin, slender rice grains
+   * (instanced, 160 meshes) drifting under a slowly shifting warm sun. */
+  function initBackground() {
+    const canvas = document.getElementById("bgCanvas");
+    if (!canvas || !window.THREE) return;
+    let renderer;
+    try { renderer = new THREE.WebGLRenderer({ canvas, antialias: false, alpha: true }); } catch (e) { return; }
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
+    renderer.setClearColor(0x000000, 0);
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(42, 1, 0.1, 200);
+    camera.position.set(0, 8, 17);
+    scene.add(new THREE.AmbientLight(0xfff0dc, 0.85));
+    const sun = new THREE.DirectionalLight(0xffe8c8, 1.0); scene.add(sun);
+
+    // Grain: unit sphere stretched along z (about 0.06 x 0.06 x 0.30) = thin long-grain Basmati profile
+    const N = 160, grains = new THREE.InstancedMesh(new THREE.SphereGeometry(1, 10, 8),
+      new THREE.MeshPhongMaterial({ color: 0xffffff, specular: 0xffffff, shininess: 80, transparent: true, opacity: 0.35, depthWrite: false }), N);
+    const palette = [0xFFFFFF, 0xF1E6CF, 0xD9C9A5, 0x8f7f6f].map((c) => new THREE.Color(c));
+    const seed = [];
+    for (let i = 0; i < N; i++) {
+      seed.push({
+        x: (Math.random() - 0.5) * 44, y: 0.5 + Math.random() * 13, z: -14 + Math.random() * 22,
+        ph: Math.random() * 6.28, sp: 0.12 + Math.random() * 0.3,
+        w: 0.05 + Math.random() * 0.02, l: 0.26 + Math.random() * 0.08,
+        rx: Math.random() * 6.28, ry: Math.random() * 6.28,
+      });
+      grains.setColorAt(i, palette[i % palette.length]);
+    }
+    grains.instanceColor.needsUpdate = true; grains.frustumCulled = false; scene.add(grains);
+    const dummy = new THREE.Object3D();
+
+    let mx = 0, my = 0;
+    window.addEventListener("pointermove", (e) => { mx = e.clientX / window.innerWidth - 0.5; my = e.clientY / window.innerHeight - 0.5; });
+    const resize = () => { renderer.setSize(window.innerWidth, window.innerHeight, false); camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix(); };
+    window.addEventListener("resize", resize); resize();
+
+    const L = new THREE.Vector3(), gold = new THREE.Color(0xffe8c8), rose = new THREE.Color(0xffd2b4);
+    views.unshift({
+      renderer, scene, camera, visible: true,
+      tick(t) {
+        const a = t * 0.12;
+        L.set(Math.cos(a), 0.5 + 0.2 * Math.sin(a * 0.7), 0.45 * Math.sin(a) + 0.6);
+        sun.position.copy(L).multiplyScalar(20); sun.color.copy(gold).lerp(rose, (Math.sin(a * 0.5) + 1) / 2);
+        camera.position.x += (mx * 2.2 - camera.position.x) * 0.04;
+        camera.position.y += (8 + my * 0.8 - camera.position.y) * 0.04;
+        camera.lookAt(0, 0.5, -4);
+        for (let i = 0; i < N; i++) {
+          const g = seed[i];
+          const fall = (g.y - t * g.sp * 0.4) % 13; const y = 0.5 + (fall < 0 ? fall + 13 : fall);
+          dummy.position.set(g.x + Math.sin(t * 0.4 + g.ph) * 0.8, y, g.z + Math.cos(t * 0.3 + g.ph) * 0.5);
+          dummy.rotation.set(g.rx + t * 0.36 * g.sp, g.ry + t * 0.1, 0);
+          dummy.scale.set(g.w, g.w, g.l);
+          dummy.updateMatrix(); grains.setMatrixAt(i, dummy.matrix);
+        }
+        grains.instanceMatrix.needsUpdate = true;
+      },
+    });
+  }
+
+  /* ---------------- Loop ---------------- */
+  function loop() {
+    let prev = performance.now();
+    const frame = (now) => {
+      const dt = Math.min(0.05, (now - prev) / 1000); prev = now;
+      if (!document.hidden) views.forEach((v) => { if (v.visible) { v.tick(now / 1000, dt); v.renderer.render(v.scene, v.camera); } });
+      requestAnimationFrame(frame);
+    };
+    requestAnimationFrame(frame);
+  }
+
+  window.UI3D = {
+    init() {
+      initTilt();
+      initBackground();
+      const g = document.getElementById("globeBox"), c = document.getElementById("cubeBox");
+      if (g) initGlobe(g);
+      if (c) initCube(c);
+      if (views.length) loop();
+    },
+    update(list, selectedId) {
+      updateGlobe(list, selectedId);
+      updateCube(list.find((x) => x.campaign_id === selectedId) || null);
+    },
+  };
 })();

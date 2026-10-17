@@ -113,7 +113,10 @@
     if (role) { const r = document.querySelector(`input[name="senderRole"][value="${role}"]`); if (r) r.checked = true; }
     const ns = $("threadScroll"); if (ns && atBottom) ns.scrollTop = ns.scrollHeight;
   }
-  function render() { renderKpis(); renderFeed(); renderInspector(); icons(); }
+  function render() {
+    renderKpis(); renderFeed(); renderInspector(); icons();
+    if (window.UI3D) UI3D.update(campaigns(), state.selected);
+  }
 
   function select(id) { state.selected = id; state.lastRender = ""; render(); }
 
@@ -195,6 +198,7 @@
 
   /* ---------- boot ---------- */
   state.ids = store.load();
+  if (window.UI3D) UI3D.init();
   render();
   refresh();
   setInterval(() => { if (!document.hidden) refresh(); }, POLL_MS);
