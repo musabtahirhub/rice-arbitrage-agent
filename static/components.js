@@ -53,6 +53,26 @@
       </div></button>`;
   }
 
+  /* ---- Contact book row (Contacts modal) ---- */
+  function contactRow(p) {
+    const where = [p.country, p.port].filter(Boolean).join(" · ");
+    return `<div class="flex items-center justify-between gap-2 py-1.5 border-b border-slate-200/70 last:border-0">
+      <div class="min-w-0"><div class="text-xs font-semibold truncate">${esc(p.name)}</div>
+        <div class="text-[11px] text-slate-500 mono truncate">${esc(p.email)}${where ? " · " + esc(where) : ""}</div></div>
+      <button type="button" class="btn btn-red !py-1 !px-2" data-delete-contact="${esc(p.id)}" title="Remove ${esc(p.name)}"><i data-lucide="trash-2" class="w-3 h-3"></i></button>
+    </div>`;
+  }
+  function contactList(list, role) {
+    return list.length ? list.map(contactRow).join("") : `<p class="text-[11px] text-slate-500 py-2">No saved ${role}s yet.</p>`;
+  }
+
+  /* Who this campaign is negotiating with (inspector header). */
+  function partiesLine(c) {
+    const party = (label, name, email) => email ? `<span>${label}: <b class="font-semibold text-slate-600">${esc(name || "–")}</b> <span class="mono">&lt;${esc(email)}&gt;</span></span>` : "";
+    const parts = [party("Buyer", c.target_buyer_name, c.target_buyer_email), party("Supplier", c.target_supplier_name, c.target_supplier_email)].filter(Boolean);
+    return parts.length ? `<div class="text-[11px] text-slate-400 mt-0.5 flex flex-wrap gap-x-3">${parts.join("")}</div>` : "";
+  }
+
   /* ---- Pricing cards ---- */
   function priceCard(label, value, hint, accent) {
     return `<div class="price-card tilt${accent ? " accent-" + accent : ""}"><div class="label">${esc(label)}</div><div class="value">${value}</div>${hint ? `<div class="hint">${esc(hint)}</div>` : ""}</div>`;
@@ -188,14 +208,14 @@
     return `<div class="space-y-3">
       <div class="panel p-3 flex flex-wrap items-center justify-between gap-3">
         <div class="min-w-0"><div class="flex items-center gap-2"><span class="mono text-sm font-bold">${esc(c.campaign_id)}</span>${statusBadge(c.deal_status)}</div>
-        <div class="text-[11px] text-slate-400 mt-0.5">${esc(c.commodity)} · round ${esc(c.negotiation_round ?? 0)}/${esc(c.max_negotiation_rounds ?? "–")}</div></div>
+        <div class="text-[11px] text-slate-400 mt-0.5">${esc(c.commodity)} · round ${esc(c.negotiation_round ?? 0)}/${esc(c.max_negotiation_rounds ?? "–")}</div>${partiesLine(c)}</div>
         <div class="w-full sm:w-80">${pipeline(c)}</div></div>
       ${approvalBanner(c)}
       <div class="inspector-split"><div class="space-y-3 min-w-0">${threadPanel(c, threadFilter)}${simulator(c)}</div>
       <div class="space-y-3 min-w-0">${pricingPanel(c)}${auditTimeline(c)}</div></div></div>`;
   }
 
-  window.UI = { esc, usd, pct, statusInfo, statusBadge, marginTone, campaignRow, inspector, emptyInspector, emptyFeed, approvalSummary };
+  window.UI = { esc, usd, pct, statusInfo, statusBadge, marginTone, campaignRow, contactList, inspector, emptyInspector, emptyFeed, approvalSummary };
 })();
 
 /* ---------------------------------------------------------------------------

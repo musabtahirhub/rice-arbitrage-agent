@@ -3,9 +3,10 @@
 Campaign and ParsedEmail are stored in LangGraph checkpoints, which allow-list them by module path
 ("app.models", see app/graph.py). Keep them in this module so existing checkpoints still load.
 """
+import re
 from typing import Any, Literal, Optional, TypedDict
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.config import settings
 
@@ -140,6 +141,34 @@ class CreateCampaignRequest(BaseModel):
     min_profit_per_mt_soft: float = Field(default_factory=lambda: settings.default_min_profit_per_mt_soft)
     max_negotiation_rounds: int = Field(default_factory=lambda: settings.default_max_negotiation_rounds)
     auto_run: bool = Field(default=False)
+    # Saved contacts (POST /api/counterparties) to negotiate with. None = test inbox, then the directory.
+    buyer_id: Optional[str] = None
+    supplier_id: Optional[str] = None
+
+
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+class CreateCounterpartyRequest(BaseModel):
+    role: Literal["buyer", "supplier"]
+    name: str = Field(..., min_length=1, max_length=200)
+    email: str = Field(..., max_length=320)
+    country: Optional[str] = Field(default=None, max_length=100)
+    port: Optional[str] = Field(default=None, max_length=100)
+
+    @field_validator("name", "country", "port")
+    @classmethod
+    def _strip(cls, value: Optional[str]) -> Optional[str]:
+        value = value.strip() if value else value
+        return value or None
+
+    @field_validator("email")
+    @classmethod
+    def _valid_email(cls, value: str) -> str:
+        value = value.strip().lower()
+        if not _EMAIL_RE.match(value):
+            raise ValueError("enter a valid email address")
+        return value
 
 
 class SimulateTurnRequest(BaseModel):

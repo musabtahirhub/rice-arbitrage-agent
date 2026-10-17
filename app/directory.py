@@ -106,15 +106,21 @@ def resolve_supplier_contact(
     state_email: Optional[str] = None,
     state_name: Optional[str] = None,
 ) -> tuple[str, str]:
-    """(name, email) for supplier mail: the test inbox first (MY_TEST_SUPPLIER_EMAIL), then the address
-    already on the deal, then the directory. Test mode wins so no directory address is ever mailed while testing."""
+    """(name, email) for supplier mail: the address on the deal (a supplier the desk picked at launch, or the
+    one used so far), then the test inbox (MY_TEST_SUPPLIER_EMAIL), then the directory. While testing, the test
+    inbox still overrides a built-in directory address left on the deal, so the sample companies are never mailed."""
     suppliers = get_suppliers_for_commodity(commodity)
     primary = suppliers[0] if suppliers else None
     name = state_name or (primary.name if primary else "Supplier Partner")
     test_email = settings.my_test_supplier_email.strip()
+    if state_email and not (test_email and _is_directory_address(state_email)):
+        return name, state_email
     if test_email:
         return name, test_email
-    if state_email:
-        return name, state_email
     return name, primary.contact_email if primary else "export@supplier.com"
+
+
+def _is_directory_address(email: str) -> bool:
+    addr = email.strip().lower()
+    return any(p.contact_email.lower() == addr for p in (*BUYERS, *SUPPLIERS))
 

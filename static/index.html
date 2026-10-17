@@ -33,6 +33,7 @@
         <span id="healthBadge" class="badge badge-gray desk-only">Checking…</span>
         <span id="lastSync" class="hidden md:inline text-[10px] text-slate-500 mono desk-only"></span>
         <button id="refreshBtn" class="btn !py-1 desk-only" title="Refresh now"><i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i></button>
+        <button id="contactsBtn" class="btn !py-1 desk-only" title="Buyers &amp; suppliers"><i data-lucide="users" class="w-3.5 h-3.5"></i><span class="hidden sm:inline">Contacts</span></button>
         <button id="newCampaignBtn" class="btn btn-blue !py-1 desk-only"><i data-lucide="plus" class="w-3.5 h-3.5"></i><span class="hidden sm:inline">New campaign</span></button>
         <a href="/docs" target="_blank" rel="noopener" class="btn !py-1 hidden sm:inline-flex desk-only">API <i data-lucide="external-link" class="w-3 h-3"></i></a>
         <a href="#landing" class="btn !py-1 desk-only" title="Back to home"><i data-lucide="house" class="w-3.5 h-3.5"></i></a>
@@ -180,12 +181,50 @@
         <div><label class="kpi-label block mb-1">Soft target $/MT</label><input id="fSoft" type="number" value="120" class="input mono" /></div>
         <div><label class="kpi-label block mb-1">Max rounds</label><input id="fRounds" type="number" min="1" max="10" value="3" class="input mono" /></div>
       </div>
+      <div class="grid grid-cols-2 gap-3">
+        <div><label class="kpi-label block mb-1" for="fBuyer">Buyer</label>
+          <select id="fBuyer" class="input" data-role="buyer"></select></div>
+        <div><label class="kpi-label block mb-1" for="fSupplier">Supplier</label>
+          <select id="fSupplier" class="input" data-role="supplier"></select></div>
+      </div>
       <label class="flex items-center gap-2 text-xs text-slate-300"><input id="fAuto" type="checkbox" /> Auto-run full simulated negotiation</label>
       <div class="flex justify-end gap-2 pt-1">
         <button type="button" data-close class="btn">Cancel</button>
         <button type="submit" id="launchBtn" class="btn btn-blue">Launch</button>
       </div>
     </form>
+  </div>
+
+  <!-- Contact book modal: desk-managed buyers and suppliers -->
+  <div id="contactsModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="contactsTitle">
+    <div class="modal p-5 space-y-3">
+      <div class="flex items-center justify-between">
+        <h2 id="contactsTitle" class="text-sm font-bold flex items-center gap-2"><i data-lucide="users" class="w-4 h-4"></i>Buyers &amp; suppliers</h2>
+        <button type="button" data-close class="text-slate-400 hover:text-white"><i data-lucide="x" class="w-4 h-4"></i></button>
+      </div>
+      <div class="grid sm:grid-cols-2 gap-3">
+        <div><div class="kpi-label mb-1">Buyers</div><div id="buyerContacts"></div></div>
+        <div><div class="kpi-label mb-1">Suppliers</div><div id="supplierContacts"></div></div>
+      </div>
+      <form id="contactForm" class="space-y-3 pt-2 border-t border-slate-200/70">
+        <div class="kpi-label">Add contact</div>
+        <div class="grid grid-cols-3 gap-3">
+          <div><label class="kpi-label block mb-1" for="cRole">Role</label>
+            <select id="cRole" class="input"><option value="buyer">Buyer</option><option value="supplier">Supplier</option></select></div>
+          <div class="col-span-2"><label class="kpi-label block mb-1" for="cName">Company / name</label><input id="cName" class="input" required maxlength="200" placeholder="Gulf Food Trading LLC" /></div>
+        </div>
+        <div><label class="kpi-label block mb-1" for="cEmail">Email</label><input id="cEmail" type="email" class="input mono" required placeholder="procurement@example.com" /></div>
+        <div class="grid grid-cols-2 gap-3">
+          <div><label class="kpi-label block mb-1" for="cCountry">Country</label><input id="cCountry" class="input" maxlength="100" placeholder="Optional" /></div>
+          <div><label class="kpi-label block mb-1" for="cPort">Port</label><input id="cPort" class="input" maxlength="100" placeholder="Optional" /></div>
+        </div>
+        <p class="text-[11px] text-slate-500">Campaigns launched with a contact picked send all of that side's mail to it, instead of the test inbox.</p>
+        <div class="flex justify-end gap-2">
+          <button type="button" data-close class="btn">Done</button>
+          <button type="submit" id="addContactBtn" class="btn btn-blue"><i data-lucide="plus" class="w-3.5 h-3.5"></i>Add contact</button>
+        </div>
+      </form>
+    </div>
   </div>
 
   <!-- HITL approval modal -->

@@ -253,7 +253,24 @@ class CampaignStatusResponse(BaseModel):
     supplier_terms: Optional[dict[str, Any]] = None
     buyer_draft: Optional[str] = None
     supplier_draft: Optional[str] = None
+    target_buyer_name: Optional[str] = None
+    target_buyer_email: Optional[str] = None
+    target_supplier_name: Optional[str] = None
+    target_supplier_email: Optional[str] = None
     audit_transcript: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class CounterpartyResponse(BaseModel):
+    """A saved contact from ``/api/counterparties``."""
+
+    id: str
+    role: str
+    name: str
+    email: str
+    country: Optional[str] = None
+    port: Optional[str] = None
+
+
 class NegotiateTurnResponse(BaseModel):
     """``POST /api/negotiate``."""
 

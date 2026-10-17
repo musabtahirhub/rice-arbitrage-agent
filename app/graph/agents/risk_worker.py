@@ -72,13 +72,14 @@ def resolve_desk_proposed_rate(state: DealState, role: str) -> float:
 
 
 def _generate_initial_supplier_rfq(
-    campaign: Campaign, terms: ParsedEmail, freight: float, config: Optional[RunnableConfig] = None
+    campaign: Campaign, terms: ParsedEmail, freight: float, supplier_name: Optional[str] = None,
+    config: Optional[RunnableConfig] = None,
 ) -> tuple[float, str]:
     """(target FOB ceiling, RFQ draft): the ceiling keeps the soft-target spread against the buyer's bid."""
     target_fob_ceiling = round(
         terms.price_usd_per_mt - freight - resolve_buffer_usd(campaign) - campaign.min_profit_per_mt_soft, 2
     )
-    supp_name, _ = resolve_supplier_contact(campaign.commodity)
+    supp_name, _ = resolve_supplier_contact(campaign.commodity, state_name=supplier_name)
     prompt = SUPPLIER_RFQ_PROMPT.format(
         desk_name=settings.desk_name,
         supplier_name=supp_name,
@@ -122,7 +123,7 @@ def _process_parsed_buyer_terms(
             campaign.origin_port_default, campaign.destination_port
         )
         update.target_fob_ceiling, update.supplier_draft = _generate_initial_supplier_rfq(
-            campaign, terms, freight, config=config
+            campaign, terms, freight, supplier_name=state.get("target_supplier_name"), config=config
         )
         update.supplier_thread_subject = state.get("supplier_thread_subject") or rfq_subject(
             campaign.campaign_id, campaign.commodity, campaign.origin_port_default

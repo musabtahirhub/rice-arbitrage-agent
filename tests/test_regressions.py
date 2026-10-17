@@ -318,11 +318,14 @@ class TestGmailWorkerInbound(_DbTestCase):
 class TestSupplierTestInbox(_DbTestCase):
     INBOX = "desk-tester+supplier@example.org"
 
-    def test_resolver_prefers_test_inbox_over_state_and_directory(self):
+    def test_resolver_prefers_test_inbox_over_directory_address_on_deal(self):
         from app.directory import resolve_supplier_contact
 
         with patch.object(settings, "my_test_supplier_email", self.INBOX):
-            self.assertEqual(resolve_supplier_contact("Basmati 1121", "old@indusrice.pk")[1], self.INBOX)
+            # A directory address left on the deal is never mailed while testing...
+            self.assertEqual(resolve_supplier_contact("Basmati 1121", "export@indusrice.pk")[1], self.INBOX)
+            # ...but a supplier the desk picked for the campaign is.
+            self.assertEqual(resolve_supplier_contact("Basmati 1121", "old@indusrice.pk")[1], "old@indusrice.pk")
         with patch.object(settings, "my_test_supplier_email", ""):
             self.assertEqual(resolve_supplier_contact("Basmati 1121", "old@indusrice.pk")[1], "old@indusrice.pk")
             self.assertEqual(resolve_supplier_contact("Basmati 1121")[1], "export@indusrice.pk")

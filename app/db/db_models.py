@@ -2,7 +2,7 @@
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import Column, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Column, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Session, declarative_base, relationship
 
 from app.config import settings
@@ -61,6 +61,22 @@ class ProcessedInboundEmailModel(Base):
     campaign_id = Column(String, nullable=True)
     source = Column(String, nullable=False)  # "push" | "poll"
     status = Column(String, nullable=False, default="processing")  # "processing" | "done"
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
+
+
+class CounterpartyModel(Base):
+    """A buyer or supplier the desk saved in its contact book. A campaign launched with one picked
+    copies its name and email into graph state, so deleting the contact never affects a live deal."""
+
+    __tablename__ = "counterparties"
+    __table_args__ = (UniqueConstraint("role", "email", name="uq_counterparties_role_email"),)
+
+    id = Column(String, primary_key=True)  # CP-xxxxxx
+    role = Column(String, nullable=False)  # "buyer" | "supplier"
+    name = Column(String, nullable=False)
+    email = Column(String, nullable=False)
+    country = Column(String, nullable=True)
+    port = Column(String, nullable=True)
     created_at = Column(DateTime, default=_utcnow, nullable=False)
 
 

@@ -9,10 +9,11 @@ from sqlalchemy.orm import Session
 
 import app.db.database
 from app.config import settings
-from app.db.db_models import CampaignModel
+from app.db.db_models import CampaignModel, CounterpartyModel
 from app.directory import (
     get_buyers_for_commodity,
 )
+from app.graph import workflow
 from app.logger import get_logger
 from app.models import CLOSED_DEAL_STATUSES
 from app.services.mail.email_matcher import find_open_campaign
@@ -145,12 +146,18 @@ async def process_incoming_gmail_event(history_id: str) -> None:
 
 
 def _collect_allowed_senders(db: Session) -> set[str]:
-    """Test inboxes plus every buyer contact of an open campaign's commodity."""
+    """Test inboxes, the desk's saved contacts, and every open campaign's own contacts and commodity buyers."""
     allowed = {inbox.strip().lower() for inbox in (settings.my_test_email, settings.my_test_supplier_email) if inbox}
+    allowed.update(row.email for row in db.query(CounterpartyModel.email).all())
     open_campaigns = db.query(CampaignModel).filter(~CampaignModel.deal_status.in_(CLOSED_DEAL_STATUSES)).all()
     for campaign in open_campaigns:
         allowed.update(
             b.contact_email.strip().lower() for b in get_buyers_for_commodity(campaign.commodity) if b.contact_email
+        )
+        # A picked contact deleted from the book after launch still belongs to its running campaign.
+        state = workflow.get_state_values({"configurable": {"thread_id": campaign.id}})
+        allowed.update(
+            str(state[key]).strip().lower() for key in ("target_buyer_email", "target_supplier_email") if state.get(key)
         )
     return allowed
 

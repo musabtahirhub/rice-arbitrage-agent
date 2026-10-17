@@ -67,10 +67,16 @@ def load_campaign_state(db_camp: CampaignModel, config: dict) -> dict:
 
 
 def classify_sender_role(sender: str, state: dict, commodity: str) -> str:
-    """Supplier if the sender is a known supplier contact for this campaign; otherwise buyer."""
+    """The deal's own contacts decide first: a desk-picked buyer may use an address that is a supplier
+    elsewhere (even MY_TEST_SUPPLIER_EMAIL), and vice versa. Otherwise supplier if the sender is a known
+    supplier contact for this campaign, else buyer."""
     addr = email.utils.parseaddr(sender)[1].strip().lower()
     if not addr:
         return "buyer"
+    if addr == str(state.get("target_buyer_email") or "").strip().lower():
+        return "buyer"
+    if addr == str(state.get("target_supplier_email") or "").strip().lower():
+        return "supplier"
     supplier_addrs = {
         s.contact_email.strip().lower() for s in get_suppliers_for_commodity(commodity) if s.contact_email
     }
@@ -112,9 +118,10 @@ def resolve_deal_contacts(
     campaign: Campaign, sender: str, desk_emails: set[str], state: dict, role: str
 ) -> DealContacts:
     """Buyer and supplier to answer. An external sender replaces the stored address for their own side."""
+    # A buyer the desk picked at launch (state) wins over the test inbox and the directory.
     primary_buyer = select_primary_buyer(campaign.commodity)
-    buyer_name = primary_buyer.name if primary_buyer else "Procurement Partner"
-    default_buyer_email = settings.my_test_email or (
+    buyer_name = state.get("target_buyer_name") or (primary_buyer.name if primary_buyer else "Procurement Partner")
+    default_buyer_email = state.get("target_buyer_email") or settings.my_test_email or (
         primary_buyer.contact_email if primary_buyer else "procurement@domain.com"
     )
     supp_name, supp_email = resolve_supplier_contact(
@@ -133,6 +140,7 @@ def resolve_deal_contacts(
 
 def record_contacts_in_state(state: dict, contacts: DealContacts) -> None:
     state.update(
+        target_buyer_name=contacts.buyer_name,
         target_buyer_email=contacts.buyer_email,
         target_supplier_email=contacts.supplier_email,
         target_supplier_name=contacts.supplier_name,

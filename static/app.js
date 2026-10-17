@@ -12,6 +12,8 @@
     threadFilter: "all",
     listSupported: true,  // flips off if GET /api/campaigns is not served
     lastRender: "",
+    contacts: { buyers: [], suppliers: [] },  // desk contact book (GET /api/counterparties)
+    pickFor: null,        // launch-form select ("buyer"/"supplier") waiting for a newly added contact
   };
 
   /* ---------- helpers ---------- */
@@ -128,6 +130,66 @@
   });
   document.addEventListener("keydown", (e) => { if (e.key === "Escape") document.querySelectorAll(".modal-backdrop").forEach((m) => m.classList.add("hidden")); });
 
+  /* ---------- contact book ---------- */
+  const ADD_NEW = "__add__";
+  function fillContactSelect(sel, list) {
+    const current = sel.value;
+    sel.innerHTML = `<option value="">Default (test inbox / directory)</option>`
+      + list.map((p) => `<option value="${UI.esc(p.id)}">${UI.esc(p.name)} · ${UI.esc(p.email)}</option>`).join("")
+      + `<option value="${ADD_NEW}">＋ Add new…</option>`;
+    sel.value = list.some((p) => p.id === current) ? current : "";
+  }
+  function renderContacts() {
+    const { buyers, suppliers } = state.contacts;
+    $("buyerContacts").innerHTML = UI.contactList(buyers, "buyer");
+    $("supplierContacts").innerHTML = UI.contactList(suppliers, "supplier");
+    fillContactSelect($("fBuyer"), buyers);
+    fillContactSelect($("fSupplier"), suppliers);
+    icons();
+  }
+  async function loadContacts() {
+    try {
+      const body = await api("/api/counterparties");
+      state.contacts = { buyers: body?.buyers || [], suppliers: body?.suppliers || [] };
+    } catch { /* keep the last known book; the selects still offer the default */ }
+    renderContacts();
+  }
+  function openContacts(role) {
+    if (role) $("cRole").value = role;
+    open("contactsModal"); loadContacts(); $("cName").focus();
+  }
+  async function addContact(e) {
+    e.preventDefault();
+    const payload = {
+      role: $("cRole").value, name: $("cName").value.trim(), email: $("cEmail").value.trim(),
+      country: $("cCountry").value.trim() || null, port: $("cPort").value.trim() || null,
+    };
+    const btn = $("addContactBtn"); btn.disabled = true;
+    try {
+      const saved = await post("/api/counterparties", payload);
+      toast(`${saved.role === "buyer" ? "Buyer" : "Supplier"} ${saved.name} saved`);
+      ["cName", "cEmail", "cCountry", "cPort"].forEach((id) => ($(id).value = ""));
+      await loadContacts();
+      if (state.pickFor === saved.role) {   // came from the launch form: pick the new contact there
+        $(saved.role === "buyer" ? "fBuyer" : "fSupplier").value = saved.id;
+        state.pickFor = null; close("contactsModal");
+      }
+    } catch (err) { toast(err.message, "error"); }
+    finally { btn.disabled = false; }
+  }
+  async function deleteContact(id) {
+    const all = [...state.contacts.buyers, ...state.contacts.suppliers];
+    const p = all.find((x) => x.id === id); if (!p) return;
+    if (!confirm(`Remove ${p.name} <${p.email}> from contacts? Running campaigns keep their contacts.`)) return;
+    try { await api("/api/counterparties/" + encodeURIComponent(id), { method: "DELETE" }); toast(`${p.name} removed`); }
+    catch (err) { toast(err.message, "error"); }
+    await loadContacts();
+  }
+  ["fBuyer", "fSupplier"].forEach((id) => $(id).addEventListener("change", (e) => {
+    if (e.target.value !== ADD_NEW) return;
+    e.target.value = ""; state.pickFor = e.target.dataset.role; openContacts(state.pickFor);
+  }));
+
   /* ---------- actions ---------- */
   async function launchCampaign(e) {
     e.preventDefault();
@@ -142,6 +204,8 @@
       min_profit_per_mt_soft: parseFloat($("fSoft").value),
       max_negotiation_rounds: parseInt($("fRounds").value, 10),
       auto_run: auto,
+      buyer_id: $("fBuyer").value || null,
+      supplier_id: $("fSupplier").value || null,
     };
     const btn = $("launchBtn"); btn.disabled = true; btn.textContent = auto ? "Running…" : "Launching…";
     try {
@@ -182,6 +246,7 @@
   /* ---------- events ---------- */
   document.addEventListener("click", (e) => {
     const row = e.target.closest("[data-campaign]"); if (row) return select(row.dataset.campaign);
+    const del = e.target.closest("[data-delete-contact]"); if (del) return deleteContact(del.dataset.deleteContact);
     const f = e.target.closest("#feedFilters [data-filter]"); if (f) { state.feedFilter = f.dataset.filter; return renderFeed(); }
     const t = e.target.closest("[data-thread]"); if (t) { state.threadFilter = t.dataset.thread; return render(); }
     if (e.target.closest('[data-action="open-approval"]')) {
@@ -191,7 +256,9 @@
   });
   document.addEventListener("submit", (e) => { if (e.target.id === "negotiateForm") submitEmail(e); });
   $("campaignForm").addEventListener("submit", launchCampaign);
-  $("newCampaignBtn").addEventListener("click", () => open("campaignModal"));
+  $("newCampaignBtn").addEventListener("click", () => { open("campaignModal"); loadContacts(); });
+  $("contactsBtn").addEventListener("click", () => { state.pickFor = null; openContacts(); });
+  $("contactForm").addEventListener("submit", addContact);
   $("refreshBtn").addEventListener("click", refresh);
   $("approveBtn").addEventListener("click", () => decide(true));
   $("rejectBtn").addEventListener("click", () => decide(false));
@@ -208,7 +275,7 @@
     const target = !admin && location.hash.length > 1 && document.getElementById(location.hash.slice(1));
     if (target && target.closest("#landingView")) target.scrollIntoView({ behavior: was === "landing" ? "smooth" : "auto" });
     else if (was !== document.documentElement.dataset.view) window.scrollTo(0, 0);
-    if (admin && was !== "admin") { state.lastRender = ""; refresh(); }
+    if (admin && was !== "admin") { state.lastRender = ""; refresh(); loadContacts(); }
   }
   window.addEventListener("hashchange", route);
 
@@ -216,6 +283,7 @@
   state.ids = store.load();
   if (window.UI3D) UI3D.init();
   render();
+  renderContacts();   // launch-form selects show the default option before the contact book loads
   document.documentElement.dataset.view = "";   // force route() to treat the first view as a fresh entry
   route();
   // Poll only while the desk is on screen; the landing page makes no API calls.

@@ -1,5 +1,6 @@
 """Campaign routes: launch, status, counterparty directory, and the bundled UI."""
 import uuid
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
@@ -7,14 +8,20 @@ from sqlalchemy.orm import Session
 
 from app.config import STATIC_DIR, settings
 from app.db.database import get_db
-from app.db.db_models import CampaignModel, TradeAuditModel, add_trade_audit, desk_party
+from app.db.db_models import CampaignModel, CounterpartyModel, TradeAuditModel, add_trade_audit, desk_party
 from app.directory import get_all_counterparties
 from app.graph import workflow
 from app.logger import get_logger
-from app.models import Campaign, CreateCampaignRequest, DealState
-from app.schemas import AuditTranscriptEntry, CampaignStatusResponse, CreateCampaignResponse, model_from_state
+from app.models import Campaign, CreateCampaignRequest, CreateCounterpartyRequest, DealState
+from app.schemas import (
+    AuditTranscriptEntry,
+    CampaignStatusResponse,
+    CounterpartyResponse,
+    CreateCampaignResponse,
+    model_from_state,
+)
 from app.services.campaign_runner import run_full_autonomous_campaign
-from app.services.mail.email_utils import split_subject_and_body
+from app.services.mail.email_utils import get_desk_email_addresses, split_subject_and_body
 from app.telemetry import build_trace_config, flush_telemetry, get_langfuse_handler
 
 logger = get_logger("arbitrage_desk")
@@ -66,6 +73,86 @@ def list_directory():
     return get_all_counterparties()
 
 
+def _counterparty_response(row: CounterpartyModel) -> dict:
+    return CounterpartyResponse(
+        id=row.id, role=row.role, name=row.name, email=row.email, country=row.country, port=row.port
+    ).model_dump()
+
+
+@router.get("/api/counterparties")
+def list_counterparties(db: Session = Depends(get_db)):
+    """The desk's saved contact book, split by role."""
+    rows = db.query(CounterpartyModel).order_by(CounterpartyModel.created_at.asc()).all()
+    return {
+        "buyers": [_counterparty_response(r) for r in rows if r.role == "buyer"],
+        "suppliers": [_counterparty_response(r) for r in rows if r.role == "supplier"],
+    }
+
+
+@router.post("/api/counterparties", status_code=201)
+def create_counterparty(req: CreateCounterpartyRequest, db: Session = Depends(get_db)):
+    if req.email in get_desk_email_addresses():
+        raise HTTPException(status_code=422, detail="That is the desk's own address; add the counterparty's email.")
+    # One address, one role: replies are classified buyer/supplier by sender address, so an address saved
+    # as both could never be told apart.
+    existing = db.query(CounterpartyModel).filter(CounterpartyModel.email == req.email).first()
+    if existing and existing.role == req.role:
+        raise HTTPException(status_code=409, detail=f"A {req.role} with email {req.email} is already saved.")
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail=f"{req.email} is already saved as a {existing.role} ({existing.name}). "
+            f"A buyer and a supplier cannot share an email address.",
+        )
+    row = CounterpartyModel(id=f"CP-{uuid.uuid4().hex[:6].upper()}", **req.model_dump())
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    logger.info(f"[CONTACTS] Saved {row.role} '{row.name}' <{row.email}> as {row.id}")
+    return _counterparty_response(row)
+
+
+@router.delete("/api/counterparties/{counterparty_id}")
+def delete_counterparty(counterparty_id: str, db: Session = Depends(get_db)):
+    """Remove a contact from the book. Campaigns already launched with it keep their copy in state."""
+    row = db.query(CounterpartyModel).filter(CounterpartyModel.id == counterparty_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail=f"Contact {counterparty_id} not found.")
+    db.delete(row)
+    db.commit()
+    logger.info(f"[CONTACTS] Deleted {row.role} '{row.name}' <{row.email}> ({counterparty_id})")
+    return {"deleted": counterparty_id}
+
+
+def _saved_contact(contact_id: Optional[str], role: str, db: Session) -> Optional[CounterpartyModel]:
+    if not contact_id:
+        return None
+    row = db.query(CounterpartyModel).filter(CounterpartyModel.id == contact_id).first()
+    if not row or row.role != role:
+        raise HTTPException(status_code=422, detail=f"No saved {role} with id {contact_id}.")
+    return row
+
+
+def _resolve_campaign_contacts(req: CreateCampaignRequest, db: Session) -> dict:
+    """State fields for the picked buyer/supplier. Inbound mail from a supplier address is classified as
+    supplier, so the picked buyer must not share an address with the supplier side."""
+    buyer = _saved_contact(req.buyer_id, "buyer", db)
+    supplier = _saved_contact(req.supplier_id, "supplier", db)
+    buyer_addr = buyer.email if buyer else settings.my_test_email.strip().lower()
+    supplier_addr = supplier.email if supplier else settings.my_test_supplier_email.strip().lower()
+    if (buyer or supplier) and buyer_addr and buyer_addr == supplier_addr:
+        raise HTTPException(
+            status_code=422,
+            detail="The buyer and supplier must use different email addresses, or replies cannot be told apart.",
+        )
+    contacts = {}
+    if buyer:
+        contacts.update(target_buyer_name=buyer.name, target_buyer_email=buyer.email)
+    if supplier:
+        contacts.update(target_supplier_name=supplier.name, target_supplier_email=supplier.email)
+    return contacts
+
+
 def _persist_new_campaign(req: CreateCampaignRequest, campaign_id: str, db: Session) -> tuple[Campaign, CampaignModel]:
     campaign = Campaign(campaign_id=campaign_id, **req.model_dump(include=set(_CAMPAIGN_FIELDS)))
     db_campaign = CampaignModel(
@@ -83,7 +170,7 @@ def _persist_new_campaign(req: CreateCampaignRequest, campaign_id: str, db: Sess
     return campaign, db_campaign
 
 
-def _launch_campaign_graph(campaign: Campaign) -> dict:
+def _launch_campaign_graph(campaign: Campaign, contacts: Optional[dict] = None) -> dict:
     """First graph turn (no inbound email): proactive outreach drafts and sends the opening SCO."""
     initial_state: DealState = {
         "campaign": campaign,
@@ -101,6 +188,7 @@ def _launch_campaign_graph(campaign: Campaign) -> dict:
         "buyer_draft": "",
         "supplier_draft": "",
         "audit_transcript": [],
+        **(contacts or {}),
     }
     config = build_trace_config(
         campaign.campaign_id,
@@ -128,8 +216,9 @@ def create_campaign(req: CreateCampaignRequest, db: Session = Depends(get_db)):
         f"[CAMPAIGN CREATE] Received request for '{req.commodity}' ({req.target_volume_mt:,.0f} MT) "
         f"-> Port: {req.destination_port} | Target Margin: {req.target_margin_pct}% | Auto-run: {req.auto_run}"
     )
+    contacts = _resolve_campaign_contacts(req, db)
     campaign, db_campaign = _persist_new_campaign(req, campaign_id, db)
-    launched = _launch_campaign_graph(campaign)
+    launched = _launch_campaign_graph(campaign, contacts)
     _record_launch(campaign_id, db_campaign, launched, db)
     logger.info(
         f"[CAMPAIGN CREATED] ID='{campaign_id}' | Benchmark FOB: ${launched.get('benchmark_fob_usd', 0.0):.2f}/MT | "
