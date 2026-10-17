@@ -1,27 +1,31 @@
-import logging
+"""Campaign routes: launch, status, counterparty directory, and the bundled UI."""
 import uuid
-from pathlib import Path
+
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
-from app.config import settings
-from app.database import get_db
-from app.db_models import CampaignModel, TradeAuditModel
-from app.directory import get_all_counterparties
-from app.email_service import parse_email_draft
-from app.models import Campaign, CreateCampaignRequest, DealState
-import app.workflow
+from app.agents import workflow
+from app.agents.state import DealState
+from app.api.schemas import CampaignStatusResponse, CreateCampaignRequest, CreateCampaignResponse
+from app.config import STATIC_DIR, settings
+from app.db import CampaignModel, get_db
+from app.logger import get_logger
+from app.models import Campaign
+from app.services.audit import add_trade_audit, load_campaign_transcript
 from app.services.campaign_runner import run_full_autonomous_campaign
-from app.telemetry import build_trace_config, flush_telemetry, get_langfuse_handler
+from app.services.directory import get_all_counterparties
+from app.utils.state_mapping import model_from_state
+from app.utils.telemetry import build_trace_config, flush_telemetry, get_langfuse_handler
 
-logger = logging.getLogger("arbitrage_desk")
+logger = get_logger("arbitrage_desk")
 
 router = APIRouter()
 
-STATIC_DIR = Path(__file__).resolve().parent.parent.parent / "static"
-if not STATIC_DIR.exists():
-    STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
+_CAMPAIGN_FIELDS = (
+    "commodity", "target_volume_mt", "target_margin_pct", "max_variance_from_benchmark_pct", "destination_port",
+    "min_profit_per_mt_hard", "min_profit_per_mt_soft", "max_negotiation_rounds",
+)
 
 
 @router.get("/api/directory")
@@ -29,19 +33,8 @@ def list_directory():
     return get_all_counterparties()
 
 
-def _create_and_persist_campaign_models(req: CreateCampaignRequest, campaign_id: str, db: Session) -> tuple[Campaign, CampaignModel]:
-    campaign = Campaign(
-        campaign_id=campaign_id,
-        commodity=req.commodity,
-        target_volume_mt=req.target_volume_mt,
-        target_margin_pct=req.target_margin_pct,
-        max_variance_from_benchmark_pct=req.max_variance_from_benchmark_pct,
-        destination_port=req.destination_port,
-        min_profit_per_mt_hard=req.min_profit_per_mt_hard,
-        min_profit_per_mt_soft=req.min_profit_per_mt_soft,
-        max_negotiation_rounds=req.max_negotiation_rounds,
-    )
-
+def _persist_new_campaign(req: CreateCampaignRequest, campaign_id: str, db: Session) -> tuple[Campaign, CampaignModel]:
+    campaign = Campaign(campaign_id=campaign_id, **req.model_dump(include=set(_CAMPAIGN_FIELDS)))
     db_campaign = CampaignModel(
         id=campaign_id,
         commodity=req.commodity,
@@ -57,7 +50,8 @@ def _create_and_persist_campaign_models(req: CreateCampaignRequest, campaign_id:
     return campaign, db_campaign
 
 
-def _execute_initial_graph_step(campaign: Campaign, langfuse_handler=None) -> dict:
+def _launch_campaign_graph(campaign: Campaign) -> dict:
+    """First graph turn (no inbound email): proactive outreach drafts and sends the opening SCO."""
     initial_state: DealState = {
         "campaign": campaign,
         "negotiation_round": 0,
@@ -78,184 +72,81 @@ def _execute_initial_graph_step(campaign: Campaign, langfuse_handler=None) -> di
     config = build_trace_config(
         campaign.campaign_id,
         "campaign-launch",
-        langfuse_handler,
+        get_langfuse_handler(),
         metadata={"commodity": campaign.commodity, "target_volume_mt": campaign.target_volume_mt},
         tags=[campaign.commodity],
     )
-    return app.workflow.get_trade_graph().invoke(initial_state, config=config)
+    return workflow.get_trade_graph().invoke(initial_state, config=config)
 
 
-def _persist_outbound_audit_and_status(
-    campaign_id: str,
-    db_campaign: CampaignModel,
-    launched_state: dict,
-    db: Session,
-) -> None:
+def _record_launch(campaign_id: str, db_campaign: CampaignModel, launched_state: dict, db: Session) -> None:
     db_campaign.deal_status = launched_state.get("deal_status", "prospecting")
     db_campaign.anchor_cif_usd = launched_state.get("anchor_cif_usd")
-
     if launched_state.get("buyer_draft"):
-        sco_audit = TradeAuditModel(
-            campaign_id=campaign_id,
-            thread_id=campaign_id,
-            role="agent",
-            counterparty_price=launched_state.get("anchor_cif_usd"),
-            net_spread=0.0,
-            raw_message=launched_state.get("buyer_draft"),
-            direction="OUTBOUND",
-        )
-        db.add(sco_audit)
+        add_trade_audit(db, campaign_id, "agent", launched_state["buyer_draft"], "OUTBOUND",
+                        counterparty_price=launched_state.get("anchor_cif_usd"), net_spread=0.0)
     db.commit()
-
-
-from app.schemas import (
-    AuditTranscriptEntry,
-    CampaignStatusResponse,
-    CreateCampaignResponse,
-    DeskConfigResponse,
-)
-
-
-def _build_create_campaign_response(
-    campaign_id: str,
-    campaign: Campaign,
-    launched_state: dict,
-) -> dict:
-    resp = CreateCampaignResponse(
-        campaign_id=campaign_id,
-        commodity=campaign.commodity,
-        benchmark_fob_usd=launched_state.get("benchmark_fob_usd"),
-        freight_cost_usd=launched_state.get("freight_cost_usd"),
-        dynamic_fob_ceiling=launched_state.get("dynamic_fob_ceiling"),
-        dynamic_cif_floor=launched_state.get("dynamic_cif_floor"),
-        anchor_cif_usd=launched_state.get("anchor_cif_usd"),
-        buyer_draft=launched_state.get("buyer_draft"),
-        pipeline_step=launched_state.get("pipeline_step", 1),
-        deal_status=launched_state.get("deal_status", "prospecting"),
-        min_profit_per_mt_hard=campaign.min_profit_per_mt_hard,
-        min_profit_per_mt_soft=campaign.min_profit_per_mt_soft,
-        max_negotiation_rounds=campaign.max_negotiation_rounds,
-        discovered_buyers=launched_state.get("discovered_buyers", []),
-        discovered_suppliers=launched_state.get("discovered_suppliers", []),
-        audit_transcript=launched_state.get("audit_transcript", []),
-        status="initialized",
-    )
-    return resp.model_dump()
 
 
 @router.post("/api/campaigns")
 def create_campaign(req: CreateCampaignRequest, db: Session = Depends(get_db)):
-    langfuse_handler = get_langfuse_handler()
     campaign_id = f"CAMP-{uuid.uuid4().hex[:6].upper()}"
     logger.info(
         f"[CAMPAIGN CREATE] Received request for '{req.commodity}' ({req.target_volume_mt:,.0f} MT) "
         f"-> Port: {req.destination_port} | Target Margin: {req.target_margin_pct}% | Auto-run: {req.auto_run}"
     )
-
-    campaign, db_campaign = _create_and_persist_campaign_models(req, campaign_id, db)
-    launched_state = _execute_initial_graph_step(campaign, langfuse_handler=langfuse_handler)
-    _persist_outbound_audit_and_status(campaign_id, db_campaign, launched_state, db)
-
+    campaign, db_campaign = _persist_new_campaign(req, campaign_id, db)
+    launched = _launch_campaign_graph(campaign)
+    _record_launch(campaign_id, db_campaign, launched, db)
     logger.info(
-        f"[CAMPAIGN CREATED] ID='{campaign_id}' | Benchmark FOB: ${launched_state.get('benchmark_fob_usd', 0.0):.2f}/MT | "
-        f"Freight: ${launched_state.get('freight_cost_usd', 0.0):.2f}/MT | Dynamic FOB Ceiling: ${launched_state.get('dynamic_fob_ceiling', 0.0):.2f}/MT | "
-        f"Anchor CIF: ${launched_state.get('anchor_cif_usd', 0.0):.2f}/MT"
+        f"[CAMPAIGN CREATED] ID='{campaign_id}' | Benchmark FOB: ${launched.get('benchmark_fob_usd', 0.0):.2f}/MT | "
+        f"Freight: ${launched.get('freight_cost_usd', 0.0):.2f}/MT | "
+        f"Dynamic FOB Ceiling: ${launched.get('dynamic_fob_ceiling', 0.0):.2f}/MT | "
+        f"Anchor CIF: ${launched.get('anchor_cif_usd', 0.0):.2f}/MT"
     )
 
     if req.auto_run:
-        logger.info(f"[AUTONOMOUS CAMPAIGN] Auto-running campaign '{campaign_id}' through full negotiation lifecycle...")
+        logger.info(
+            f"[AUTONOMOUS CAMPAIGN] Auto-running campaign '{campaign_id}' through full negotiation lifecycle..."
+        )
         res = run_full_autonomous_campaign(campaign_id, db=db)
         flush_telemetry()
         logger.info(f"[AUTONOMOUS CAMPAIGN] Campaign '{campaign_id}' completed with status: {res.get('deal_status')}")
         return res
 
-    resp = _build_create_campaign_response(campaign_id, campaign, launched_state)
-    flush_telemetry()
-    return resp
-
-
-def _load_or_reconstruct_transcript(state: dict, campaign_id: str, db: Session) -> list:
-    """Return the most complete history available.
-
-    Graph state only holds entries written by graph nodes (e.g. the opening SCO), while every API and
-    email turn is recorded in trade_audits. Use whichever source has more entries.
-    """
-    state_transcript = state.get("audit_transcript") or []
-    audits = (
-        db.query(TradeAuditModel)
-        .filter(TradeAuditModel.campaign_id == campaign_id)
-        .order_by(TradeAuditModel.id.asc())
-        .all()
-    )
-    if len(state_transcript) >= len(audits):
-        return state_transcript
-
-    desk = f"Trading Desk ({settings.desk_name})"
-    transcript = []
-    for turn, a in enumerate(audits):
-        message = a.raw_message or ""
-        subject = parse_email_draft(message, default_subject="")[0] if message.lower().startswith("subject:") else ""
-        inbound = a.direction == "INBOUND"
-        entry = AuditTranscriptEntry(
-            turn=turn,
-            sender=a.role if inbound else desk,
-            recipient=desk if inbound else "counterparty",
-            role=a.role,
-            action=a.direction,
-            subject=subject,
-            message=message,
-        )
-        transcript.append(entry.model_dump(exclude_none=True))
-    return transcript
-
-
-def _build_campaign_status_payload(
-    campaign_id: str,
-    db_camp: CampaignModel,
-    state: dict,
-    audit_transcript: list,
-) -> dict:
-    campaign_obj = state.get("campaign")
-    commodity = campaign_obj.commodity if campaign_obj else db_camp.commodity
-    target_margin_pct = campaign_obj.target_margin_pct if campaign_obj else settings.default_target_margin_pct
-    min_profit_per_mt_hard = campaign_obj.min_profit_per_mt_hard if campaign_obj else settings.default_min_profit_per_mt_hard
-    min_profit_per_mt_soft = campaign_obj.min_profit_per_mt_soft if campaign_obj else settings.default_min_profit_per_mt_soft
-    max_negotiation_rounds = campaign_obj.max_negotiation_rounds if campaign_obj else settings.default_max_negotiation_rounds
-
-    buyer_t = state.get("buyer_terms")
-    supp_t = state.get("supplier_terms")
-
-    resp = CampaignStatusResponse(
+    resp = model_from_state(
+        CreateCampaignResponse, launched,
         campaign_id=campaign_id,
-        commodity=commodity,
-        target_margin_pct=target_margin_pct,
-        min_profit_per_mt_hard=min_profit_per_mt_hard,
-        min_profit_per_mt_soft=min_profit_per_mt_soft,
-        max_negotiation_rounds=max_negotiation_rounds,
-        negotiation_round=state.get("negotiation_round", 0),
-        negotiation_rounds_completed=state.get("negotiation_round", 0),
-        deal_status=state.get("deal_status", db_camp.deal_status),
-        action=state.get("action"),
-        pipeline_step=state.get("pipeline_step", 1),
-        is_deal_viable=state.get("is_deal_viable"),
-        net_spread_usd=state.get("net_spread_usd", 0.0),
-        final_net_spread_usd=state.get("net_spread_usd", 0.0),
-        net_margin_pct=state.get("net_margin_pct"),
-        final_net_margin_pct=state.get("net_margin_pct"),
-        evaluation_reason=state.get("evaluation_reason"),
-        dynamic_fob_ceiling=state.get("dynamic_fob_ceiling"),
-        dynamic_cif_floor=state.get("dynamic_cif_floor"),
-        target_fob_ceiling=state.get("target_fob_ceiling", 0.0),
-        anchor_cif_usd=state.get("anchor_cif_usd", db_camp.anchor_cif_usd or 0.0),
-        benchmark_fob_usd=state.get("benchmark_fob_usd"),
-        freight_cost_usd=state.get("freight_cost_usd"),
-        buyer_terms=buyer_t.model_dump() if buyer_t else None,
-        supplier_terms=supp_t.model_dump() if supp_t else None,
-        buyer_draft=state.get("buyer_draft"),
-        supplier_draft=state.get("supplier_draft"),
-        audit_transcript=audit_transcript,
+        commodity=campaign.commodity,
+        min_profit_per_mt_hard=campaign.min_profit_per_mt_hard,
+        min_profit_per_mt_soft=campaign.min_profit_per_mt_soft,
+        max_negotiation_rounds=campaign.max_negotiation_rounds,
+        status="initialized",
     )
+    flush_telemetry()
     return resp.model_dump()
+
+
+def _campaign_limits(state: dict) -> dict:
+    """Commodity and margin limits from the checkpointed campaign, else the desk defaults."""
+    campaign = state.get("campaign")
+    if campaign:
+        return {
+            name: getattr(campaign, name)
+            for name in (
+                "commodity",
+                "target_margin_pct",
+                "min_profit_per_mt_hard",
+                "min_profit_per_mt_soft",
+                "max_negotiation_rounds",
+            )
+        }
+    return {
+        "target_margin_pct": settings.default_target_margin_pct,
+        "min_profit_per_mt_hard": settings.default_min_profit_per_mt_hard,
+        "min_profit_per_mt_soft": settings.default_min_profit_per_mt_soft,
+        "max_negotiation_rounds": settings.default_max_negotiation_rounds,
+    }
 
 
 @router.get("/api/campaigns/{campaign_id}")
@@ -264,31 +155,18 @@ def get_campaign_status(campaign_id: str, db: Session = Depends(get_db)):
     if not db_camp:
         raise HTTPException(status_code=404, detail=f"Campaign {campaign_id} not found.")
 
-    config = {"configurable": {"thread_id": campaign_id}}
-    snapshot = app.workflow.get_trade_graph().get_state(config)
-    state = dict(snapshot.values) if snapshot and snapshot.values else {}
-
-    audit_transcript = _load_or_reconstruct_transcript(state, campaign_id, db)
-    return _build_campaign_status_payload(campaign_id, db_camp, state, audit_transcript)
-
-
-@router.get("/api/config")
-def get_desk_config():
-    resp = DeskConfigResponse(
-        desk_name=settings.desk_name,
-        desk_email=settings.desk_email,
-        default_commodity=settings.default_commodity,
-        default_target_volume_mt=settings.default_target_volume_mt,
-        default_target_margin_pct=settings.default_target_margin_pct,
-        default_max_variance_pct=settings.default_max_variance_pct,
-        default_buffer_usd_per_mt=settings.default_buffer_usd_per_mt,
-        default_destination_port=settings.default_destination_port,
-        default_origin_port=settings.default_origin_port,
-        default_payment_terms=settings.default_payment_terms,
-        default_broken_percentage=settings.default_broken_percentage,
-        min_profit_per_mt_hard=settings.default_min_profit_per_mt_hard,
-        min_profit_per_mt_soft=settings.default_min_profit_per_mt_soft,
-        max_negotiation_rounds=settings.default_max_negotiation_rounds,
+    state = workflow.get_state_values({"configurable": {"thread_id": campaign_id}})
+    limits = {"commodity": db_camp.commodity, **_campaign_limits(state)}
+    resp = model_from_state(
+        CampaignStatusResponse, state,
+        **limits,
+        campaign_id=campaign_id,
+        negotiation_rounds_completed=state.get("negotiation_round", 0),
+        deal_status=state.get("deal_status", db_camp.deal_status),
+        final_net_spread_usd=state.get("net_spread_usd", 0.0),
+        final_net_margin_pct=state.get("net_margin_pct"),
+        anchor_cif_usd=state.get("anchor_cif_usd", db_camp.anchor_cif_usd or 0.0),
+        audit_transcript=load_campaign_transcript(state, campaign_id, db),
     )
     return resp.model_dump()
 

@@ -2,17 +2,13 @@ import sys
 import time
 import uuid
 
+from app.agents.state import DealState
+from app.agents.workflow import get_trade_graph
 from app.config import settings
-from app.email_service import (
-    check_latest_reply,
-    get_unseen_message_ids,
-    parse_email_draft,
-    send_email,
-)
-from app.market import estimate_freight, get_benchmark_rate
-from app.math_engine import calculate_dynamic_bounds
-from app.models import Campaign, DealState, ParsedEmail
-from app.workflow import generate_proactive_sco_draft, get_trade_graph
+from app.models import Campaign, ParsedEmail
+from app.services.imap import check_latest_reply, get_unseen_message_ids
+from app.services.smtp import send_email
+from app.utils.email_text import make_message_id, split_subject_and_body
 
 
 def run_live_email_negotiation(recipient_email: str | None = None):
@@ -95,7 +91,7 @@ def run_live_email_negotiation(recipient_email: str | None = None):
         )
 
     sco_draft = state.get("buyer_draft", "")
-    sco_subject, sco_body = parse_email_draft(sco_draft)
+    sco_subject, sco_body = split_subject_and_body(sco_draft)
     print("\n" + "-" * 72)
     print(f"OUTBOUND EMAIL DRAFT (Turn 0):\nSUBJECT: {sco_subject}\n\n{sco_body}")
     print("-" * 72)
@@ -158,13 +154,13 @@ def run_live_email_negotiation(recipient_email: str | None = None):
             print(f"[REASON]  {reason}")
 
             outbound_msg = state.get("buyer_draft", "")
-            out_sub, out_body = parse_email_draft(outbound_msg)
+            out_sub, out_body = split_subject_and_body(outbound_msg)
 
             print("\n" + "-" * 72)
             print(f"OUTBOUND AGENT RESPONSE ({action}):\nSUBJECT: {out_sub}\n\n{out_body}")
             print("-" * 72)
 
-            response_msg_id = email.utils.make_msgid(domain=desk_domain)
+            response_msg_id = make_message_id(settings.email_user.strip())
             send_email(
                 target_email,
                 outbound_msg,

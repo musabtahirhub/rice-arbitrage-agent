@@ -1,7 +1,16 @@
-from typing import Literal, Optional, TypedDict
+"""Domain models shared by the graph, services and API.
+
+Campaign and ParsedEmail are stored in LangGraph checkpoints, which allow-list them by module path
+("app.models", see app/agents/graph.py). Keep them in this module so existing checkpoints still load.
+"""
+from typing import Optional
+
 from pydantic import BaseModel, Field
 
 from app.config import settings
+
+# Deal statuses after which a campaign takes no further inbound email.
+CLOSED_DEAL_STATUSES = ("closed", "rejected")
 
 
 class Campaign(BaseModel):
@@ -43,96 +52,14 @@ class Counterparty(BaseModel):
     reputation_score: float = Field(default=4.5, ge=1.0, le=5.0)
 
 
-class DealState(TypedDict, total=False):
-    campaign: Campaign
-    benchmark_fob_usd: float
-    freight_cost_usd: float
-    dynamic_fob_ceiling: float
-    dynamic_cif_floor: float
-    target_fob_ceiling: float
-    anchor_cif_usd: float
-    buyer_terms: Optional[ParsedEmail]
-    supplier_terms: Optional[ParsedEmail]
-    negotiation_round: int
-    deal_status: str
-    action: Optional[Literal["REJECT_HARD", "COUNTER_TO_MAXIMIZE", "ACCEPT_AND_CLOSE"]]
-    pipeline_step: int
-    is_deal_viable: bool
-    net_spread_usd: float
-    net_margin_pct: float
-    evaluation_reason: str
-    latest_email: str
-    active_role: str
-    buyer_draft: str
-    supplier_draft: str
-    audit_transcript: list[dict]
-    thread_subject: Optional[str]
-    last_buyer_message_id: Optional[str]
-    buyer_references: Optional[str]
-    last_supplier_message_id: Optional[str]
-    supplier_references: Optional[str]
-    last_counter_cif_usd: Optional[float]
-    buyer_accepted: Optional[bool]
-    target_buyer_name: Optional[str]
-    target_buyer_email: Optional[str]
-    target_supplier_name: Optional[str]
-    target_supplier_email: Optional[str]
-    gmail_thread_id: Optional[str]
-    discovered_buyers: Optional[list[dict]]
-    discovered_suppliers: Optional[list[dict]]
-    trigger: Optional[str]
-    skip_email_dispatch: Optional[bool]
-    deal_approved_by_human: Optional[bool]
-    reviewer_notes: Optional[str]
-    # One-shot human override for the next buyer counter; consumed (reset to None) by counter_buyer_node.
-    override_cif_price: Optional[float]
+class AuditTranscriptEntry(BaseModel):
+    """A single entry in the audit_transcript list."""
 
-
-class ApprovalPayload(BaseModel):
-    approved: bool
-    override_cif_price: Optional[float] = None
-    reviewer_notes: Optional[str] = None
-
-
-class CreateCampaignRequest(BaseModel):
-    commodity: str = Field(default_factory=lambda: settings.default_commodity)
-    target_volume_mt: float = Field(default_factory=lambda: settings.default_target_volume_mt)
-    target_margin_pct: float = Field(default_factory=lambda: settings.default_target_margin_pct)
-    max_variance_from_benchmark_pct: float = Field(default_factory=lambda: settings.default_max_variance_pct)
-    destination_port: str = Field(default_factory=lambda: settings.default_destination_port)
-    min_profit_per_mt_hard: float = Field(default_factory=lambda: settings.default_min_profit_per_mt_hard)
-    min_profit_per_mt_soft: float = Field(default_factory=lambda: settings.default_min_profit_per_mt_soft)
-    max_negotiation_rounds: int = Field(default_factory=lambda: settings.default_max_negotiation_rounds)
-    auto_run: bool = Field(default=False)
-
-
-class SimulateTurnRequest(BaseModel):
-    campaign_id: str
-    sender_role: str
-    raw_email: str
-
-
-# Re-export schemas for unified access
-from app.schemas import (  # noqa: E402
-    ApprovalResumeDecision,
-    ApprovalReviewPayload,
-    ApproveDealResponse,
-    AuditTranscriptEntry,
-    AutonomousRunnerResult,
-    CampaignStatusResponse,
-    ConfirmDealUpdate,
-    CounterBuyerUpdate,
-    CounterSupplierUpdate,
-    CreateCampaignResponse,
-    DealEvaluation,
-    DeskConfigResponse,
-    DynamicBounds,
-    EvaluateRiskUpdate,
-    FetchMarketDataUpdate,
-    NegotiateTurnResponse,
-    ParsedBuyerTermsUpdate,
-    ParsedSupplierTermsUpdate,
-    ProactiveOutreachUpdate,
-    RejectDealUpdate,
-    WebhookResponse,
-)
+    turn: int = 0
+    sender: str = ""
+    recipient: str = ""
+    role: str = ""
+    action: str = ""
+    subject: str = ""
+    message: str = ""
+    id: Optional[str] = None

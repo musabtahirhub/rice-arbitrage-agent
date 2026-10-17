@@ -1,14 +1,15 @@
 import sys
+
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.types import Command
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
-from langgraph.checkpoint.memory import MemorySaver
-from langgraph.types import Command
 
-import app.database
+import app.agents.workflow
+import app.db
 import app.main
-import app.workflow
-from app.db_models import Base, CampaignModel, TradeAuditModel
+from app.db import Base, CampaignModel, TradeAuditModel
 
 # Setup isolated test database and test checkpointer
 test_engine = create_engine(
@@ -19,9 +20,8 @@ test_engine = create_engine(
 TestSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=test_engine)
 Base.metadata.create_all(bind=test_engine)
 
-app.database.engine = test_engine
-app.database.SessionLocal = TestSessionLocal
-app.main.SessionLocal = TestSessionLocal
+app.db.engine = test_engine
+app.db.SessionLocal = TestSessionLocal
 
 
 def _override_get_db():
@@ -32,26 +32,22 @@ def _override_get_db():
         db.close()
 
 
-app.main.app.dependency_overrides[app.database.get_db] = _override_get_db
+app.main.app.dependency_overrides[app.db.get_db] = _override_get_db
 
 test_checkpointer = MemorySaver()
 test_checkpointer.setup = lambda: None
-app.workflow.checkpointer = test_checkpointer
-app.workflow.trade_graph = app.workflow.build_trade_graph(checkpointer=test_checkpointer)
-app.main.trade_graph = app.workflow.trade_graph
-trade_graph = app.workflow.trade_graph
+app.agents.workflow.checkpointer = test_checkpointer
+app.agents.workflow.trade_graph = app.agents.workflow.build_trade_graph(checkpointer=test_checkpointer)
+trade_graph = app.agents.workflow.trade_graph
 
-from app.models import Campaign, DealState, ParsedEmail
-from app.directory import get_buyers_for_commodity, get_suppliers_for_commodity
-from app.market import get_benchmark_rate, estimate_freight
-from app.math_engine import (
-    calculate_dynamic_bounds,
-    calculate_landed_cost,
-    calculate_net_margin,
-    evaluate_deal,
-    evaluate_deal_strategy,
-    normalize_terms,
-)
+from app.agents.state import DealState
+from app.models import Campaign, ParsedEmail
+from app.services.deal_evaluation import evaluate_deal
+from app.services.deal_strategy import evaluate_deal_strategy
+from app.services.directory import get_buyers_for_commodity, get_suppliers_for_commodity
+from app.services.freight import estimate_freight
+from app.services.market import get_benchmark_rate
+from app.services.pricing import calculate_dynamic_bounds, calculate_landed_cost, calculate_net_margin
 
 PASS_COUNT = 0
 FAIL_COUNT = 0
@@ -77,7 +73,8 @@ def test_market_and_directory():
     assert_true(len(suppliers) >= 1, "Found matching Basmati suppliers")
     assert_true(any("Indus Rice" in s.name for s in suppliers), "Indus Rice Mills found in directory")
 
-    from app.market import fetch_live_market_data, parse_thai_rice_html, CACHE_FILE
+    from app.services.market import fetch_live_market_data, parse_thai_rice_html
+    from app.services.market_cache import CACHE_FILE
     rates = fetch_live_market_data()
     assert_true(len(rates) >= 5, "Market rates dictionary loaded")
     assert_true(CACHE_FILE.exists(), "market_cache.json created on disk")
@@ -99,7 +96,7 @@ def test_market_and_directory():
     assert_true(parsed.get("thai white 5%") == 496.0, f"HTML parser extracted Thai White 5%: {parsed.get('thai white 5%')}")
     assert_true(parsed.get("pathumthani fragrant") == 478.0, "HTML parser extracted Pathumthani Fragrant")
 
-    from app.market import parse_yahoo_finance_json
+    from app.services.market import parse_yahoo_finance_json
     sample_yahoo = {
         "chart": {
             "result": [{
@@ -144,8 +141,8 @@ def test_deterministic_math_engine():
         target_margin_pct=10.0,
         buffer_usd=20.0,
     )
-    assert_true(bounds["dynamic_fob_ceiling"] == 945.0, f"FOB ceiling is $945.00 (got {bounds['dynamic_fob_ceiling']})")
-    assert_true(bounds["dynamic_cif_floor"] == 1111.0, f"CIF floor is $1111.00 (got {bounds['dynamic_cif_floor']})")
+    assert_true(bounds.dynamic_fob_ceiling == 945.0, f"FOB ceiling is $945.00 (got {bounds.dynamic_fob_ceiling})")
+    assert_true(bounds.dynamic_cif_floor == 1111.0, f"CIF floor is $1111.00 (got {bounds.dynamic_cif_floor})")
 
 
 def test_risk_evaluation_gates():
@@ -172,8 +169,8 @@ def test_risk_evaluation_gates():
         port="Jebel Ali",
     )
     res_no_supp = evaluate_deal(campaign, buyer_terms, None, bench_fob, freight)
-    assert_true(not res_no_supp["viable"], "Zero-Risk Invariant: Deal not viable without supplier")
-    assert_true("Zero-Risk Invariant" in res_no_supp["reason"], "Reason cites Zero-Risk Invariant")
+    assert_true(not res_no_supp.viable, "Zero-Risk Invariant: Deal not viable without supplier")
+    assert_true("Zero-Risk Invariant" in res_no_supp.reason, "Reason cites Zero-Risk Invariant")
 
     supplier_high = ParsedEmail(
         sender_role="supplier",
@@ -184,8 +181,8 @@ def test_risk_evaluation_gates():
         port="Karachi",
     )
     res_supp_high = evaluate_deal(campaign, buyer_terms, supplier_high, bench_fob, freight)
-    assert_true(not res_supp_high["viable"], "Supplier above ceiling: Deal rejected")
-    assert_true("exceeds dynamic ceiling" in res_supp_high["reason"], "Reason cites FOB ceiling")
+    assert_true(not res_supp_high.viable, "Supplier above ceiling: Deal rejected")
+    assert_true("exceeds dynamic ceiling" in res_supp_high.reason, "Reason cites FOB ceiling")
 
     supplier_good = ParsedEmail(
         sender_role="supplier",
@@ -204,8 +201,8 @@ def test_risk_evaluation_gates():
         port="Jebel Ali",
     )
     res_buyer_low = evaluate_deal(campaign, buyer_low, supplier_good, bench_fob, freight)
-    assert_true(not res_buyer_low["viable"], "Buyer below floor: Deal rejected")
-    assert_true("below minimum viable floor" in res_buyer_low["reason"], "Reason cites CIF floor")
+    assert_true(not res_buyer_low.viable, "Buyer below floor: Deal rejected")
+    assert_true("below minimum viable floor" in res_buyer_low.reason, "Reason cites CIF floor")
 
     supplier_mismatch = ParsedEmail(
         sender_role="supplier",
@@ -216,12 +213,12 @@ def test_risk_evaluation_gates():
         port="Karachi",
     )
     res_mismatch = evaluate_deal(campaign, buyer_terms, supplier_mismatch, bench_fob, freight)
-    assert_true(not res_mismatch["viable"], "Quantity mismatch: Deal rejected")
-    assert_true("Quantity mismatch" in res_mismatch["reason"], "Reason cites quantity mismatch")
+    assert_true(not res_mismatch.viable, "Quantity mismatch: Deal rejected")
+    assert_true("Quantity mismatch" in res_mismatch.reason, "Reason cites quantity mismatch")
 
     res_viable = evaluate_deal(campaign, buyer_terms, supplier_good, bench_fob, freight)
-    assert_true(res_viable["viable"], "Viable deal accepted")
-    assert_true(res_viable["net_margin_pct"] >= 10.0, f"Net margin exceeds target (got {res_viable['net_margin_pct']}%)")
+    assert_true(res_viable.viable, "Viable deal accepted")
+    assert_true(res_viable.net_margin_pct >= 10.0, f"Net margin exceeds target (got {res_viable.net_margin_pct}%)")
 
 
 def test_langgraph_workflow():
@@ -296,6 +293,7 @@ def test_langgraph_workflow():
 def test_fastapi_endpoints():
     print("\n--- 5. Testing FastAPI REST Endpoints & UI Serving ---")
     from starlette.testclient import TestClient
+
     from app.main import app
 
     client = TestClient(app)
@@ -373,6 +371,7 @@ def test_fastapi_endpoints():
 def test_proactive_origination_and_tactical_maximization():
     print("\n--- 6. Testing Proactive Origination & Tactical Margin Maximization ---")
     from starlette.testclient import TestClient
+
     from app.main import app
 
     client = TestClient(app)
@@ -423,9 +422,9 @@ def test_proactive_origination_and_tactical_maximization():
         round_num=1,
         campaign=campaign,
     )
-    assert_true(res_hard["action"] == "REJECT_HARD", f"Deal yielding $30/MT is rejected under hard floor: {res_hard['action']}")
-    assert_true(not res_hard["viable"], "Deal yielding $30/MT is marked non-viable")
-    assert_true(res_hard["net_spread"] == 30.0, f"Net spread is correctly calculated as $30.00/MT (got {res_hard['net_spread']})")
+    assert_true(res_hard.action == "REJECT_HARD", f"Deal yielding $30/MT is rejected under hard floor: {res_hard.action}")
+    assert_true(not res_hard.viable, "Deal yielding $30/MT is marked non-viable")
+    assert_true(res_hard.net_spread == 30.0, f"Net spread is correctly calculated as $30.00/MT (got {res_hard.net_spread})")
 
     state_hard: DealState = {
         "campaign": campaign,
@@ -459,9 +458,9 @@ def test_proactive_origination_and_tactical_maximization():
         round_num=1,
         campaign=campaign,
     )
-    assert_true(res_r1["action"] == "COUNTER_TO_MAXIMIZE", f"Round 1: $80/MT is countered to maximize: {res_r1['action']}")
-    assert_true(res_r1["viable"], "Round 1: Deal is viable (profitable concession zone)")
-    assert_true(res_r1["net_spread"] == 80.0, f"Net spread is $80.00/MT (got {res_r1['net_spread']})")
+    assert_true(res_r1.action == "COUNTER_TO_MAXIMIZE", f"Round 1: $80/MT is countered to maximize: {res_r1.action}")
+    assert_true(res_r1.viable, "Round 1: Deal is viable (profitable concession zone)")
+    assert_true(res_r1.net_spread == 80.0, f"Net spread is $80.00/MT (got {res_r1.net_spread})")
 
     res_r2 = evaluate_deal_strategy(
         buyer_cif=1045.0,
@@ -471,7 +470,7 @@ def test_proactive_origination_and_tactical_maximization():
         round_num=2,
         campaign=campaign,
     )
-    assert_true(res_r2["action"] == "COUNTER_TO_MAXIMIZE", f"Round 2: $80/MT is countered in round 2: {res_r2['action']}")
+    assert_true(res_r2.action == "COUNTER_TO_MAXIMIZE", f"Round 2: $80/MT is countered in round 2: {res_r2.action}")
 
     res_r3 = evaluate_deal_strategy(
         buyer_cif=1045.0,
@@ -481,8 +480,8 @@ def test_proactive_origination_and_tactical_maximization():
         round_num=3,
         campaign=campaign,
     )
-    assert_true(res_r3["action"] == "ACCEPT_AND_CLOSE", f"Round 3: $80/MT accepted once rounds expire: {res_r3['action']}")
-    assert_true(res_r3["viable"], "Round 3: Deal accepted and viable")
+    assert_true(res_r3.action == "ACCEPT_AND_CLOSE", f"Round 3: $80/MT accepted once rounds expire: {res_r3.action}")
+    assert_true(res_r3.viable, "Round 3: Deal accepted and viable")
 
     t1_res = client.post("/api/negotiate", json={
         "campaign_id": cid,
@@ -530,8 +529,8 @@ def test_proactive_origination_and_tactical_maximization():
 def test_autonomous_end_to_end_campaign():
     print("\n--- 7. Testing Autonomous End-to-End Campaign Execution (auto_run=True) ---")
     from starlette.testclient import TestClient
+
     from app.main import app
-    from app.workflow import run_full_autonomous_campaign
 
     client = TestClient(app)
 
@@ -607,15 +606,12 @@ def test_autonomous_end_to_end_campaign():
 
 def test_dynamic_llm_email_generation_and_transport():
     print("\n--- 8. Testing Dynamic LLM Email Generation & Transport Bridge ---")
-    from app.email_service import check_latest_reply, parse_email_draft, send_email
-    from app.workflow import (
-        confirm_deal_node,
-        counter_buyer_node,
-        counter_supplier_node,
-        generate_proactive_sco_draft,
-        reject_deal_node,
-        split_subject_and_body,
-    )
+    from app.agents.nodes.counter_buyer import counter_buyer_node
+    from app.agents.nodes.counter_supplier import counter_supplier_node
+    from app.agents.nodes.finalization import confirm_deal_node, reject_deal_node
+    from app.agents.nodes.outreach import generate_proactive_sco_draft
+    from app.services.smtp import send_email
+    from app.utils.email_text import split_subject_and_body
 
     sample_strict = """SUBJECT: Commercial Firm Offer — Basmati 1121 CIF Jebel Ali
 BODY:
@@ -629,12 +625,12 @@ We are pleased to present this parcel specification for 500 MT."""
 
 Dear Mill Manager,
 Please provide earliest shipping readiness for 500 MT."""
-    sub2, body2 = parse_email_draft(sample_rfc)
+    sub2, body2 = split_subject_and_body(sample_rfc)
     assert_true(sub2 == "Urgent RFQ — Basmati 1121 FOB Karachi", f"RFC subject extracted: {sub2}")
     assert_true("Dear Mill Manager" in body2, "RFC body extracted")
 
     sample_plain = "Hello, this is just a body text without any headers."
-    sub3, body3 = parse_email_draft(sample_plain, default_subject="Default Subject")
+    sub3, body3 = split_subject_and_body(sample_plain, default_subject="Default Subject")
     assert_true(sub3 == "Default Subject", "Fallback to default subject for plain text")
     assert_true(body3 == sample_plain, "Plain body preserved")
 
@@ -646,9 +642,9 @@ Please provide earliest shipping readiness for 500 MT."""
         destination_port="Jebel Ali",
         origin_port_default="Karachi",
     )
-    sco_draft = generate_proactive_sco_draft(campaign, 1114.16, "Gulf Food Trading", "gulf@trade.com")
+    sco_draft = generate_proactive_sco_draft(campaign, 1114.16, "Gulf Food Trading")
     assert_true(len(sco_draft) > 50, "Proactive SCO draft generated")
-    sco_sub, sco_body = parse_email_draft(sco_draft)
+    sco_sub, sco_body = split_subject_and_body(sco_draft)
     assert_true(len(sco_sub) > 5, f"Cold SCO has contextual subject: '{sco_sub}'")
     assert_true("Basmati 1121" in sco_draft, "Cold SCO mentions commodity")
     assert_true("Jebel Ali" in sco_draft, "Cold SCO mentions destination port")
@@ -698,21 +694,21 @@ Please provide earliest shipping readiness for 500 MT."""
     cb_res = counter_buyer_node(state)
     assert_true(cb_res.get("deal_status") == "counter_sent", "counter_buyer_node sets counter_sent status")
     assert_true(len(cb_res.get("buyer_draft", "")) > 50, "counter_buyer_node produces rich draft")
-    cb_sub, cb_body = parse_email_draft(cb_res["buyer_draft"])
+    cb_sub, cb_body = split_subject_and_body(cb_res["buyer_draft"])
     assert_true(len(cb_sub) > 5, f"counter_buyer_node produced dynamic subject: '{cb_sub}'")
 
     cs_res = counter_supplier_node(state)
     assert_true(cs_res.get("deal_status") == "counter_sent", "counter_supplier_node sets counter_sent status")
     assert_true(len(cs_res.get("supplier_draft", "")) > 50, "counter_supplier_node produces rich draft")
-    cs_sub, cs_body = parse_email_draft(cs_res["supplier_draft"])
+    cs_sub, cs_body = split_subject_and_body(cs_res["supplier_draft"])
     assert_true(len(cs_sub) > 5, f"counter_supplier_node produced dynamic subject: '{cs_sub}'")
 
     cd_res = confirm_deal_node(state)
     assert_true(cd_res.get("deal_status") == "closed", "confirm_deal_node closes deal")
     assert_true(len(cd_res.get("supplier_draft", "")) > 50, "confirm_deal_node generates supplier volume lock")
     assert_true(len(cd_res.get("buyer_draft", "")) > 50, "confirm_deal_node generates buyer SCO acceptance")
-    cd_supp_sub, _ = parse_email_draft(cd_res["supplier_draft"])
-    cd_buyer_sub, _ = parse_email_draft(cd_res["buyer_draft"])
+    cd_supp_sub, _ = split_subject_and_body(cd_res["supplier_draft"])
+    cd_buyer_sub, _ = split_subject_and_body(cd_res["buyer_draft"])
     assert_true(len(cd_supp_sub) > 5, f"Supplier confirmation subject: '{cd_supp_sub}'")
     assert_true(len(cd_buyer_sub) > 5, f"Buyer confirmation subject: '{cd_buyer_sub}'")
 
@@ -720,10 +716,11 @@ Please provide earliest shipping readiness for 500 MT."""
     assert_true(rd_res.get("deal_status") == "rejected", "reject_deal_node sets rejected status")
     assert_true(rd_res.get("action") == "REJECT_HARD", "reject_deal_node sets action REJECT_HARD")
     assert_true(len(rd_res.get("buyer_draft", "")) > 50, "reject_deal_node generates decline correspondence")
-    rd_sub, _ = parse_email_draft(rd_res["buyer_draft"])
+    rd_sub, _ = split_subject_and_body(rd_res["buyer_draft"])
     assert_true(len(rd_sub) > 5, f"Decline notice subject: '{rd_sub}'")
 
-    from app.email_service import is_automated_or_bounce_message, is_simulated_email, normalize_thread_subject
+    from app.utils.email_filters import is_automated_or_bounce_message, is_simulated_email
+    from app.utils.email_text import normalize_thread_subject
 
     assert_true(is_simulated_email("export@indusrice.pk"), "indusrice.pk recognized as simulated domain")
     assert_true(is_simulated_email("sales@thaigrain.co.th"), "thaigrain.co.th recognized as simulated domain")
@@ -749,8 +746,8 @@ Please provide earliest shipping readiness for 500 MT."""
     )
     assert_true(sent_res is True, "send_email executes with threading headers without exception in mock/live mode")
 
-    from app.email_service import EmailReply
-    from app.main import _match_email_to_campaign
+    from app.services.email_matcher import match_email_to_campaign
+    from app.services.imap import EmailReply
 
     reply_mock = EmailReply(
         body="We counter at USD 1020/MT CIF Jebel Ali for 500 MT Basmati 1121.",
@@ -790,13 +787,14 @@ Please provide earliest shipping readiness for 500 MT."""
             ))
             db.commit()
 
-    matched = _match_email_to_campaign(reply_mock.subject, str(reply_mock), reply_mock.sender)
+    matched = match_email_to_campaign(reply_mock.subject, str(reply_mock), reply_mock.sender)
     assert_true(matched == test_cid, f"_match_email_to_campaign matched incoming email to active campaign: {matched}")
 
 
 def test_hitl_governance_gate():
     print("\n--- 9. Testing Human-in-the-Loop (HITL) Governance Gate ---")
     from starlette.testclient import TestClient
+
     from app.main import app
 
     client = TestClient(app)

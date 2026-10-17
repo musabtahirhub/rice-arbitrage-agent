@@ -1,8 +1,12 @@
-from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
-from pydantic import Field, field_validator
 import json
+from pathlib import Path
 from typing import Annotated, Any
 
+from pydantic import Field, field_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+STATIC_DIR = PROJECT_ROOT / "static"
 DEFAULT_CORS_ORIGINS = ("http://localhost:3000",)
 
 
@@ -46,7 +50,6 @@ class Settings(BaseSettings):
     use_push_webhooks: bool = True
 
     port: int = 8000
-    host: str = "127.0.0.1"
     # Explicit local-dev origin by default, never the "*" wildcard. The bundled UI is served by this app
     # (same origin) and needs no CORS entry.
     # NoDecode: hand the raw env string to assemble_cors_origins (it accepts JSON, comma-separated or a

@@ -3,6 +3,8 @@ from typing import Optional
 from app.config import settings
 from app.models import Counterparty
 
+MIDDLE_EAST_COUNTRIES = ("UAE", "Saudi Arabia", "Qatar", "Kuwait", "Oman", "Bahrain")
+
 BUYERS = [
     Counterparty(
         id="BUYER-001",
@@ -92,6 +94,13 @@ def get_suppliers_for_commodity(commodity: str) -> list[Counterparty]:
     return matches or SUPPLIERS
 
 
+def select_primary_buyer(commodity: str) -> Optional[Counterparty]:
+    """The first Middle East buyer for the commodity, else the first buyer at all."""
+    buyers = get_buyers_for_commodity(commodity)
+    middle_east = [b for b in buyers if b.country in MIDDLE_EAST_COUNTRIES]
+    return (middle_east or buyers or [None])[0]
+
+
 def resolve_supplier_contact(
     commodity: str,
     state_email: Optional[str] = None,
@@ -109,9 +118,3 @@ def resolve_supplier_contact(
         return name, state_email
     return name, primary.contact_email if primary else "export@supplier.com"
 
-
-def get_counterparty_by_id(cp_id: str) -> Optional[Counterparty]:
-    for cp in BUYERS + SUPPLIERS:
-        if cp.id == cp_id:
-            return cp
-    return None

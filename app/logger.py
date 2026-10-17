@@ -1,14 +1,13 @@
 import logging
-from typing import Optional
-from logging.handlers import RotatingFileHandler
-import os
-from pathlib import Path
 import sys
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
+from typing import Optional
 
-from app.config import settings
+from app.config import PROJECT_ROOT, settings
 
 # LOG_FILE in .env/env overrides the default, e.g. so test runs don't write into the server's log.
-LOG_FILE = Path(settings.log_file) if settings.log_file else Path(__file__).resolve().parent.parent / "logs" / "arbitrage_desk.log"
+LOG_FILE = Path(settings.log_file) if settings.log_file else PROJECT_ROOT / "logs" / "arbitrage_desk.log"
 LOGS_DIR = LOG_FILE.parent
 
 _CONFIGURED = False
@@ -19,6 +18,7 @@ def _build_console_handler(formatter: logging.Formatter, level: int) -> logging.
     console_handler.setLevel(level)
     console_handler.setFormatter(formatter)
     return console_handler
+
 
 def _build_file_handler(formatter: logging.Formatter, level: int) -> logging.Handler | None:
     try:
@@ -31,8 +31,9 @@ def _build_file_handler(formatter: logging.Formatter, level: int) -> logging.Han
         file_handler.setLevel(level)
         file_handler.setFormatter(formatter)
         return file_handler
-    except Exception as e:
+    except Exception:
         return None
+
 
 def setup_logger(name: str = "arbitrage_desk", level: Optional[int] = None) -> logging.Logger:
     global _CONFIGURED
@@ -73,4 +74,3 @@ def setup_logger(name: str = "arbitrage_desk", level: Optional[int] = None) -> l
 
 def get_logger(name: str = "arbitrage_desk") -> logging.Logger:
     return setup_logger(name)
-

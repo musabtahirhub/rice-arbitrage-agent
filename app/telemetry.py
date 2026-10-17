@@ -1,4 +1,3 @@
-
 from typing import Any, Optional
 
 from app.config import settings
@@ -21,7 +20,7 @@ def _langfuse_configured() -> bool:
 
 
 def get_langfuse_client() -> Optional["Langfuse"]:
-   
+    """The process-wide Langfuse client, or None when tracing is not configured."""
     global _langfuse_client
     if _langfuse_client is None and _langfuse_configured():
         _langfuse_client = Langfuse(
@@ -33,14 +32,14 @@ def get_langfuse_client() -> Optional["Langfuse"]:
 
 
 def get_langfuse_handler() -> Optional["CallbackHandler"]:
-
+    """A LangChain callback handler bound to the client, or None when tracing is off."""
     if CallbackHandler is None or get_langfuse_client() is None:
         return None
     return CallbackHandler(public_key=settings.langfuse_public_key)
 
 
 def flush_telemetry() -> None:
-    
+    """Flush buffered spans. A no-op when tracing is off; never raises."""
     client = get_langfuse_client()
     if client:
         try:
@@ -56,7 +55,7 @@ def build_trace_config(
     metadata: Optional[dict[str, Any]] = None,
     tags: Optional[list[str]] = None,
 ) -> dict[str, Any]:
-  
+    """RunnableConfig for one graph turn: thread id, Langfuse session/trace naming, callbacks and tags."""
     return {
         "configurable": {"thread_id": campaign_id},
         "callbacks": [langfuse_handler] if langfuse_handler else [],

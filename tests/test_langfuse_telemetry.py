@@ -7,16 +7,18 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 from starlette.testclient import TestClient
 
-from app.config import Settings, settings
-from app.db_models import Base, CampaignModel
-from app.models import ApprovalPayload, Campaign, CreateCampaignRequest, ParsedEmail
-import app.database
+import app.agents.workflow
+import app.db
 import app.main
-import app.workflow
-from app.telemetry import get_langfuse_handler, CallbackHandler
-from app.routes.campaigns import create_campaign
-from app.routes.negotiation import approve_campaign_deal
-from app.services.llm_service import generate_dynamic_llm_draft, _extract_terms_via_gemini_llm
+from app.api.approvals import approve_campaign_deal
+from app.api.campaigns import create_campaign
+from app.api.schemas import ApprovalPayload, CreateCampaignRequest
+from app.config import Settings, settings
+from app.db import Base, CampaignModel
+from app.models import Campaign
+from app.services.llm import generate_email_draft
+from app.services.term_extraction import extract_terms_with_llm
+from app.utils.telemetry import CallbackHandler, get_langfuse_handler
 
 
 class TestLangfuseTelemetry(unittest.TestCase):
@@ -30,9 +32,8 @@ class TestLangfuseTelemetry(unittest.TestCase):
         cls.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=cls.engine)
         Base.metadata.create_all(bind=cls.engine)
 
-        app.database.engine = cls.engine
-        app.database.SessionLocal = cls.SessionLocal
-        app.main.SessionLocal = cls.SessionLocal
+        app.db.engine = cls.engine
+        app.db.SessionLocal = cls.SessionLocal
 
         def _override_get_db():
             db = cls.SessionLocal()
@@ -41,7 +42,7 @@ class TestLangfuseTelemetry(unittest.TestCase):
             finally:
                 db.close()
 
-        app.main.app.dependency_overrides[app.database.get_db] = _override_get_db
+        app.main.app.dependency_overrides[app.db.get_db] = _override_get_db
         cls.client = TestClient(app.main.app)
 
     def setUp(self):
@@ -84,7 +85,7 @@ class TestLangfuseTelemetry(unittest.TestCase):
 
     def test_telemetry_get_langfuse_handler_present_keys(self):
         """2. Verify get_langfuse_handler returns CallbackHandler if keys are configured."""
-        import app.telemetry as telemetry
+        import app.utils.telemetry as telemetry
 
         # A mock client keeps the test offline (a real client would try to export to Langfuse cloud).
         with patch.object(settings, "langfuse_public_key", "pk-custom-key"), \
@@ -114,9 +115,9 @@ class TestLangfuseTelemetry(unittest.TestCase):
             "audit_transcript": [],
         }
 
-        with patch("app.routes.campaigns.get_langfuse_handler", return_value=mock_handler), \
-             patch("app.routes.campaigns.flush_telemetry") as mock_flush, \
-             patch("app.workflow.get_trade_graph", return_value=mock_graph):
+        with patch("app.api.campaigns.get_langfuse_handler", return_value=mock_handler), \
+             patch("app.api.campaigns.flush_telemetry") as mock_flush, \
+             patch("app.agents.workflow.get_trade_graph", return_value=mock_graph):
             req = CreateCampaignRequest(
                 commodity="Basmati 1121",
                 target_volume_mt=500.0,
@@ -181,11 +182,11 @@ class TestLangfuseTelemetry(unittest.TestCase):
             "audit_transcript": [],
         }
 
-        with patch("app.routes.negotiation.get_langfuse_handler", return_value=mock_handler), \
-             patch("app.routes.negotiation.flush_telemetry") as mock_flush, \
-             patch("app.workflow.get_trade_graph", return_value=mock_graph), \
-             patch("app.routes.negotiation._dispatch_buyer_approval_email"), \
-             patch("app.routes.negotiation._dispatch_supplier_approval_email"):
+        with patch("app.api.approvals.get_langfuse_handler", return_value=mock_handler), \
+             patch("app.api.approvals.flush_telemetry") as mock_flush, \
+             patch("app.agents.workflow.get_trade_graph", return_value=mock_graph), \
+             patch("app.api.approvals._dispatch_buyer_approval_email"), \
+             patch("app.api.approvals._dispatch_supplier_approval_email"):
             payload = ApprovalPayload(approved=True, reviewer_notes="Approved by trader")
             res = approve_campaign_deal(campaign_id, payload, db=self.db)
             self.assertEqual(res["deal_status"], "closed")
@@ -203,7 +204,8 @@ class TestLangfuseTelemetry(unittest.TestCase):
 
     def test_gmail_worker_attaches_callbacks_to_runtime_config(self):
         """3. In Gmail worker background turns, verify callbacks: [langfuse_handler] and thread_id are included."""
-        from app.services.gmail_worker import _build_inbound_config, _process_inbound_message_transaction
+        from app.services.inbound_dedupe import process_inbound_message_transaction
+        from app.services.inbound_state import InboundEmail, build_inbound_config
 
         db_camp = CampaignModel(
             id="CAMP-GMAIL01",
@@ -215,10 +217,10 @@ class TestLangfuseTelemetry(unittest.TestCase):
         )
         mock_handler = MagicMock()
 
-        with patch("app.services.gmail_worker.get_langfuse_handler", return_value=mock_handler), \
-             patch("app.services.gmail_worker.flush_telemetry") as mock_flush, \
-             patch("app.workflow.get_trade_graph") as mock_get_graph, \
-             patch("app.services.gmail_worker._dispatch_outbound_reply_transport"):
+        with patch("app.services.inbound_state.get_langfuse_handler", return_value=mock_handler), \
+             patch("app.services.inbound_turn.flush_telemetry") as mock_flush, \
+             patch("app.agents.workflow.get_trade_graph") as mock_get_graph, \
+             patch("app.services.inbound_replies.send_reply"):
             mock_graph = MagicMock()
             mock_graph.get_state.return_value = None
             mock_graph.invoke.return_value = {
@@ -229,15 +231,14 @@ class TestLangfuseTelemetry(unittest.TestCase):
             }
             mock_get_graph.return_value = mock_graph
 
-            config, _ = _build_inbound_config(db_camp)
+            config = build_inbound_config(db_camp)
 
             self.assertEqual(config["configurable"]["thread_id"], "CAMP-GMAIL01")
             self.assertEqual(config["callbacks"], [mock_handler])
 
-            _process_inbound_message_transaction(
-                db_camp, "We bid $950 CIF", "buyer@dubai.com", "Re: SCO", "<msg1@test.com>",
-                "", "", "thread1", set(), self.db, use_gmail_api=False
-            )
+            inbound = InboundEmail(body="We bid $950 CIF", sender="buyer@dubai.com", subject="Re: SCO",
+                                   message_id="<msg1@test.com>", thread_id="thread1")
+            process_inbound_message_transaction(db_camp, inbound, set(), self.db, use_gmail_api=False)
 
             mock_flush.assert_called_once()
 
@@ -254,8 +255,8 @@ class TestLangfuseTelemetry(unittest.TestCase):
             "metadata": {"test": "val"},
         }
 
-        with patch("app.services.llm_service._get_llm", return_value=mock_llm):
-            draft = generate_dynamic_llm_draft(
+        with patch("app.services.llm.get_chat_model", return_value=mock_llm):
+            draft = generate_email_draft(
                 prompt="Draft counter offer",
                 fallback_subject="Counter",
                 fallback_body="Counter body",
@@ -268,9 +269,9 @@ class TestLangfuseTelemetry(unittest.TestCase):
         mock_resp.content = '{"intent": "COUNTER_OFFER", "is_acceptance": false, "price_usd_per_mt": 950.0, "quantity_mt": 500.0, "port": "Jebel Ali", "summary": "Counter bid"}'
 
         # The extractor returns early without an API key; set a dummy one so the test doesn't depend on .env.
-        with patch("app.services.llm_service._get_llm", return_value=mock_llm), \
+        with patch("app.services.llm.get_chat_model", return_value=mock_llm), \
              patch.object(settings, "gemini_api_key", "test-key"):
-            parsed = _extract_terms_via_gemini_llm(
+            parsed = extract_terms_with_llm(
                 raw_text="We bid 950 USD/MT",
                 role="buyer",
                 last_proposed_price=1100.0,
@@ -293,7 +294,7 @@ class TestLangfuseTelemetry(unittest.TestCase):
 
     def test_flush_telemetry_flushes_native_client(self):
         """6. flush_telemetry() flushes the native Langfuse client and never raises."""
-        import app.telemetry as telemetry
+        import app.utils.telemetry as telemetry
 
         mock_client = MagicMock()
         with patch.object(telemetry, "get_langfuse_client", return_value=mock_client):
@@ -308,7 +309,7 @@ class TestLangfuseTelemetry(unittest.TestCase):
 
     def test_langfuse_client_is_singleton_and_disabled_without_keys(self):
         """6b. One native client per process; no client or handler when keys are missing."""
-        import app.telemetry as telemetry
+        import app.utils.telemetry as telemetry
 
         if telemetry.Langfuse is None:
             self.skipTest("langfuse not installed")
@@ -330,7 +331,7 @@ class TestLangfuseTelemetry(unittest.TestCase):
 
     def test_trace_config_sets_langfuse_session_and_trace_name(self):
         """7. Every graph turn is grouped into a Langfuse session keyed by campaign id."""
-        from app.telemetry import build_trace_config
+        from app.utils.telemetry import build_trace_config
 
         config = build_trace_config("CAMP-SESS01", "negotiation-turn", "handler",
                                     metadata={"sender_role": "buyer"}, tags=["negotiation-turn"])

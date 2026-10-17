@@ -1,7 +1,14 @@
+"""Map an inbound email to the campaign it belongs to."""
 from typing import Optional
+
 from sqlalchemy.orm import Session
-import app.database
-from app.db_models import CampaignModel, TradeAuditModel
+
+import app.db
+from app.db import CampaignModel, TradeAuditModel
+from app.logger import get_logger
+from app.models import CLOSED_DEAL_STATUSES
+
+logger = get_logger("arbitrage_desk")
 
 
 def _extract_clean_email_tokens(sender_raw: str) -> list[str]:
@@ -16,7 +23,9 @@ def _find_campaign_by_id_reference(campaigns: list[CampaignModel], text_corpus: 
     return None
 
 
-def _find_campaign_by_audit_sender(campaigns: list[CampaignModel], sender_tokens: list[str], db: Session) -> Optional[str]:
+def _find_campaign_by_audit_sender(
+    campaigns: list[CampaignModel], sender_tokens: list[str], db: Session
+) -> Optional[str]:
     if not sender_tokens:
         return None
     for campaign in campaigns:
@@ -28,7 +37,9 @@ def _find_campaign_by_audit_sender(campaigns: list[CampaignModel], sender_tokens
     return None
 
 
-def _find_campaign_by_commodity_keywords(campaigns: list[CampaignModel], subject_text: str, body_text: str) -> Optional[str]:
+def _find_campaign_by_commodity_keywords(
+    campaigns: list[CampaignModel], subject_text: str, body_text: str
+) -> Optional[str]:
     for campaign in campaigns:
         commodity_lower = campaign.commodity.lower()
         if commodity_lower in subject_text or commodity_lower in body_text:
@@ -41,7 +52,7 @@ def _find_campaign_by_commodity_keywords(campaigns: list[CampaignModel], subject
 def _fetch_candidate_campaigns(db: Session) -> list[CampaignModel]:
     active_campaigns = (
         db.query(CampaignModel)
-        .filter(~CampaignModel.deal_status.in_(["closed", "rejected"]))
+        .filter(~CampaignModel.deal_status.in_(CLOSED_DEAL_STATUSES))
         .order_by(CampaignModel.created_at.desc())
         .all()
     )
@@ -57,7 +68,7 @@ def match_email_to_campaign(subject: str, body: str, sender: str, db: Optional[S
 
     should_close_session = False
     if db is None:
-        db = app.database.SessionLocal()
+        db = app.db.SessionLocal()
         should_close_session = True
 
     try:
@@ -78,3 +89,16 @@ def match_email_to_campaign(subject: str, body: str, sender: str, db: Optional[S
     finally:
         if should_close_session:
             db.close()
+
+
+def find_open_campaign(subject: str, body: str, sender: str, db: Session) -> Optional[CampaignModel]:
+    """The matched campaign if it is still negotiating; logs and returns None otherwise."""
+    matched_id = match_email_to_campaign(subject, body, sender, db=db)
+    db_camp = db.query(CampaignModel).filter(CampaignModel.id == matched_id).first() if matched_id else None
+    if not db_camp:
+        logger.warning(f"[INBOUND] No matching active campaign found for subject: '{subject}'")
+        return None
+    if db_camp.deal_status in CLOSED_DEAL_STATUSES:
+        logger.info(f"[INBOUND] Campaign {db_camp.id} is already {db_camp.deal_status}. Skipping.")
+        return None
+    return db_camp
