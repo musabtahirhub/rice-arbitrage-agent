@@ -1,93 +1,96 @@
-# 🌾 Autonomous Commodity Arbitrage Desk (Rice Trading Agent)
+# 🌾 Autonomous Commodity Arbitrage Desk
 
-A clean, educational, mid-level multi-agent commodity arbitrage system demonstrating physical grain trading between **Asian mills** (Pakistan, Thailand, Vietnam) and **Middle Eastern institutional buyers** (UAE, Saudi Arabia).
+An AI-assisted trading desk that runs physical **rice arbitrage** between Asian mills (Pakistan, Thailand, Vietnam) and Middle Eastern buyers (UAE, Saudi Arabia). It negotiates both sides by email, prices every deal with deterministic math, and only closes after a human approves.
 
----
-
-## 🎯 Architectural Principles
-
-1. **Separation of Brains**:
-   - **Large Language Model (Gemini)**: Scoped strictly to unstructured text parsing (extracting quantities, prices, incoterms from raw emails) and polite business correspondence drafting.
-   - **Deterministic Math Engine (Pure Python)**: Calculates landed costs, ocean freight, dynamic ceilings/floors, and net profit margins with zero risk of LLM hallucination.
-
-2. **The Zero-Risk Invariant**:
-   - The intermediary desk **never commits to a buyer** or accepts a purchase order until matching supplier volume allocation is confirmed and locked. This eliminates short squeeze risk in volatile physical commodity markets.
-
-3. **Dynamic Market Grounding**:
-   - Hardcoded price boundaries are replaced with live benchmark indices (Basmati 1121, Thai White 5%, Jasmine, Vietnam 5%) and container freight matrices.
-   - **FOB Ceiling** = `Benchmark FOB * (1 + Max Variance %)`
-   - **Landed Cost** = `Supplier FOB + Ocean Freight + Operating Buffer`
-   - **CIF Floor** = `Landed Cost at Ceiling * (1 + Target Margin %)`
-   - **Net Margin %** = `((Buyer CIF - Landed Cost) / Landed Cost) * 100`
-
-4. **Transparent LangGraph State Machine**:
-   - A deterministic `StateGraph` (`app/graph/graph.py`) coordinates the entire negotiation pipeline:
-     - `parse_incoming_email` ➔ `fetch_market_data` ➔ `evaluate_risk` ➔ Conditional Router:
-       - If viable: `confirm_deal` (locks supplier first, then confirms buyer)
-       - If buyer price low: `counter_buyer` (counters firmly at CIF floor)
-       - If supplier price high: `counter_supplier` (counters firmly at FOB ceiling)
+**Stack:** Python 3.11 · FastAPI · LangGraph · Google Gemini 2.5 Flash · Langfuse · PostgreSQL · Gmail API
 
 ---
 
-## 📂 Project Structure
+## 📉 The Business Problem
 
-```text
-rice-arbitrage-agent/
-├── app/
-│   ├── main.py              # FastAPI app + lifespan (DB, checkpointer, push-or-poll email ingestion)
-│   ├── config.py, logger.py, telemetry.py
-│   ├── models.py            # Campaign, ParsedEmail, DealState, API request bodies
-│   ├── schemas.py           # Node updates, HITL payloads, pricing results, API responses
-│   ├── directory.py         # In-memory buyer/supplier directory
-│   ├── prompts.py           # Gemini prompt templates
-│   ├── db/                  # database.py (engine, sessions, pool), db_models.py (ORM + audit helpers)
-│   ├── graph/               # LangGraph: graph.py (StateGraph), workflow.py (live graph + checkpointer)
-│   │   └── agents/          # Graph nodes: buyer_agent, supplier_agent, risk_worker, finalization
-│   ├── pricing/             # formulas.py, strategy.py, evaluation.py (deal math), market.py (benchmarks, freight)
-│   ├── services/            # llm_service.py, campaign_runner.py
-│   │   └── mail/            # email_utils, smtp, imap, gmail_client, gmail_worker (push + polling),
-│   │                        #   inbound_state, inbound_turn, inbound_dedupe, email_matcher
-│   └── routes/              # campaigns, negotiation (incl. approval), webhooks
-├── migrations/              # Alembic migrations
-├── scripts/gmail_auth.py    # One-time headless Gmail OAuth setup
-├── static/                  # Trading desk UI
-├── tests/
-└── requirements.txt
+A rice trading intermediary buys from a mill and sells to an importer, and earns the **spread** between the two prices. In practice this is hard to run well:
+
+- **Slow, manual negotiation.** A trader juggles dozens of email threads with suppliers and buyers across time zones. Each one needs a quote, a counter and a follow-up.
+- **Thin, volatile margins.** Benchmark prices (Basmati 1121, Thai White 5%, Jasmine, Vietnam 5%) and ocean freight move constantly. A quote that was profitable this morning can lose money by the afternoon.
+- **Short-squeeze risk.** If the desk promises volume to a buyer before the mill has locked allocation, it can end up obliged to deliver goods it cannot source.
+- **Unstructured data.** Prices, quantities, incoterms and ports arrive as free-text email, and the counterparty also asks about payment, packing and shipment.
+- **Pricing mistakes are costly.** Getting landed cost or margin wrong on a multi-tonne shipment is a direct loss, so this arithmetic cannot be left to a language model.
+
+## 💡 The Solution
+
+A **deterministic negotiation workflow** with an LLM used only where it is strong: reading and writing email.
+
+> This is a LangGraph **state machine, not a ReAct agent**. The LLM never chooses tools or the next step. Routing and all financial decisions are plain Python.
+
+```
+inbound email ─► parse ─► market data ─► risk evaluation ─► route
+                                                              ├─ viable ───────► human approval ─► confirm
+                                                              ├─ buyer too low ► counter buyer
+                                                              ├─ supplier high ► counter supplier
+                                                              └─ rejection ────► courteous close-out
 ```
 
----
+| Job | Done by |
+|---|---|
+| Extract price, quantity, incoterm and port from an email | Gemini (with a regex fallback) |
+| Draft quotes, counters, confirmations and declines | Gemini (with template fallbacks) |
+| Landed cost, margin, FOB ceiling and CIF floor | **Pure Python** |
+| Routing, risk gating and deal finalization | **Pure Python + human approval** |
 
-## 🚀 Quickstart
+**Core pricing formulas**
 
-### 1. Installation
+- `Landed Cost = Supplier FOB + Freight + Buffer`
+- `Net Margin % = (Buyer CIF − Landed) / Landed × 100`
+- `FOB Ceiling = Benchmark × (1 + max variance %)`
+- `CIF Floor = Landed at ceiling × (1 + target margin %)`
+
+## ✨ Key Features
+
+- **Two-sided email negotiation.** Sends RFQs and quotes, counters both buyer and supplier, and keeps their threads separate.
+- **Deterministic pricing engine.** Margins and price bounds come from live market benchmarks and freight data, so the LLM never does the math.
+- **Zero-risk invariant.** The supplier allocation is locked *before* the buyer is confirmed.
+- **Human-in-the-loop approval.** The graph pauses at an `interrupt()` and resumes only when the trader approves, edits or rejects the deal.
+- **Intent-aware replies.** It tells apart a price offer, a rejection and a general question. Questions about payment, shipment or specs are answered from deal facts without touching the price.
+- **Gmail integration.** Pub/Sub push or IMAP polling, Primary-inbox filtering and exactly-once processing of every message.
+- **Trading desk UI.** A web dashboard for launching campaigns, managing a buyer and supplier contact book, and reviewing and approving deals.
+- **Durable and auditable.** Postgres checkpointing, so negotiations survive restarts, plus a full audit trail of every exchange.
+- **Observability.** Langfuse traces every graph run and Gemini call, grouped by campaign.
+- **Runs without keys.** With no Gemini, Langfuse or email credentials the app falls back to regex, templates and a no-op tracer, so demos and tests work offline.
+
+## 🚀 Quick Start
+
 ```bash
-# Create virtual environment
-python -m venv venv
-venv\Scripts\activate   # Windows
-source venv/bin/activate # macOS/Linux
-
-# Install dependencies
+python -m venv .venv
+.venv\Scripts\activate          # Windows  (macOS/Linux: source .venv/bin/activate)
 pip install -r requirements.txt
+
+copy .env.example .env          # optional: add GEMINI_API_KEY, Langfuse and email settings
+uvicorn app.main:app --reload --port 8000
 ```
 
-### 2. Environment Setup
-Copy `.env.example` to `.env`:
-```bash
-copy .env.example .env
-```
-*(Optional: Set `GEMINI_API_KEY` for live LLM extraction. If left blank, the system automatically uses reliable regex pattern matching.)*
+Open <http://localhost:8000> for the desk UI, or <http://localhost:8000/docs> for the API.
 
-### 3. Run Automated Tests
-```bash
-pytest --ignore=tests/test_live_email.py
-# or, as VS Code runs them:
-python -m unittest discover -s tests -p "test_*.py" -v
-```
-`tests/test_campaign_flow.py` and `tests/test_webhook.py` can also run as scripts (`python tests/test_webhook.py`).
-`tests/test_live_email.py` sends real email; run it only on purpose.
+**Full stack with Postgres and migrations:** `docker compose up --build`
 
-### 4. Launch the Web Application
-```bash
-uvicorn app.main:app --port 8000 --reload
+**Tests:** `pytest --ignore=tests/test_live_email.py` (`tests/test_live_email.py` sends real email, so run it only on purpose).
+
+**Live Gmail:** run `python scripts/gmail_auth.py` once to create a refresh token. The server never opens a browser.
+
+## 🗂️ Project Layout
+
 ```
-Open [http://localhost:8000](http://localhost:8000) to view the interactive dashboard.
+app/
+├── graph/        LangGraph state machine and nodes (buyer, supplier, risk, finalization, inquiry)
+├── pricing/      Deterministic formulas, strategy, deal evaluation, market data
+├── services/     Gemini client, campaign runner, mail ingestion (Gmail / IMAP / SMTP)
+├── routes/       REST API: campaigns, negotiation and approval, webhooks
+├── db/           SQLAlchemy models and audit trail
+└── schemas.py    Typed node updates and approval payloads (Pydantic V2)
+static/           Trading desk UI
+migrations/       Alembic migrations
+tests/
+```
+
+## 🔐 Security Note
+
+`.env`, `credentials.json` and `token.json` hold secrets and are git-ignored. Never commit them.
